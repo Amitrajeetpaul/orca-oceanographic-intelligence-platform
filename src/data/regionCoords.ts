@@ -30,3 +30,22 @@ const DEFAULT_COORDS = REGION_COORDS['South Kerala Coast'];
 export function resolveRegionCoords(name: string): RegionCoords {
   return REGION_COORDS[name] ?? DEFAULT_COORDS;
 }
+
+function haversineKm(a: RegionCoords, b: RegionCoords): number {
+  const R = 6371;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLon = ((b.lon - a.lon) * Math.PI) / 180;
+  const lat1 = (a.lat * Math.PI) / 180;
+  const lat2 = (b.lat * Math.PI) / 180;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+export function findNearestRegion(point: RegionCoords): { name: string; distanceKm: number } {
+  let best = { name: '', distanceKm: Infinity };
+  for (const [name, coords] of Object.entries(REGION_COORDS)) {
+    const distanceKm = haversineKm(point, coords);
+    if (distanceKm < best.distanceKm) best = { name, distanceKm };
+  }
+  return best;
+}

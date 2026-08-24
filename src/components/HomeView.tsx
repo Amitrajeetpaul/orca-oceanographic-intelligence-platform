@@ -19,9 +19,14 @@ import {
   AlertTriangle,
   Crosshair,
   X,
+  MapPin,
 } from 'lucide-react';
 import { SAMPLE_PROMPT_CHIPS, INITIAL_CHAT_MESSAGES } from '../data/mockData';
-import { resolveRegionCoords } from '../data/regionCoords';
+import { resolveRegionCoords, findNearestRegion } from '../data/regionCoords';
+
+// Beyond this, the nearest coastal region isn't really "nearby" — no point
+// suggesting Odisha's coast to someone standing in Delhi.
+const NEARBY_THRESHOLD_KM = 300;
 import { AgentDetailModal } from './AgentDetailModal';
 import { OceanMap, ProbeResult } from './OceanMap';
 
@@ -48,6 +53,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
   const [inspectedQuery, setInspectedQuery] = useState<string>('');
   const [activeRoutePath, setActiveRoutePath] = useState<boolean>(false);
   const [probedLocation, setProbedLocation] = useState<ProbedLocation | null>(null);
+  const [nearbySuggestion, setNearbySuggestion] = useState<{ name: string; distanceKm: number } | null>(null);
+  const [suggestionDismissed, setSuggestionDismissed] = useState(false);
 
   const regionCoords = resolveRegionCoords(selectedRegion);
   const [mapCenter, setMapCenter] = useState(regionCoords);
@@ -58,6 +65,28 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
   }, [messages, isProcessing, activeAgentSteps]);
+
+  // Ask for the phone's real GPS position once, and if it's actually near a
+  // coastal region we know about, offer to check conditions there — never
+  // blocks anything if the user denies or the browser has no geolocation.
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const nearest = findNearestRegion({
+          lat: position.coords.latitude,
+          lon: position.coords.longitude,
+        });
+        if (nearest.distanceKm <= NEARBY_THRESHOLD_KM) {
+          setNearbySuggestion(nearest);
+        }
+      },
+      () => {
+        // Permission denied or unavailable — silently skip, this is a nice-to-have.
+      },
+      { timeout: 10000, maximumAge: 10 * 60 * 1000 }
+    );
+  }, []);
 
   // Picking a new region from the dropdown should move the map there,
   // overriding wherever the last chat question resolved to.
@@ -205,6 +234,49 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
 
   return (
     <main className="w-full px-4 -mt-36 z-10 flex-1 pb-24">
+      {/* Location-Aware Proactive Suggestion */}
+      {nearbySuggestion && !suggestionDismissed && (
+        <div className="mb-3 bg-white rounded-2xl floating-card-shadow border border-[#c2c6d1]/35 p-3.5 flex items-start gap-3">
+          <div className="w-8 h-8 rounded-full bg-[#1a5490]/10 text-[#1a5490] flex items-center justify-center shrink-0">
+            <MapPin className="w-4 h-4" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-bold text-[#22223b]">
+              You're near {nearbySuggestion.name}
+              <span className="font-normal text-[#6b6b80]"> ({Math.round(nearbySuggestion.distanceKm)} km away)</span>
+            </p>
+            <p className="text-[11px] text-[#6b6b80] mt-0.5">Want ocean conditions and fishing suggestions for this coast?</p>
+            <div className="flex items-center gap-2 mt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setSuggestionDismissed(true);
+                  handleSendMessage(`What are today's ocean conditions and fishing safety near ${nearbySuggestion.name}?`);
+                }}
+                className="px-3 py-1 rounded-full btn-primary-gradient text-white text-[10px] font-heading font-bold cursor-pointer"
+              >
+                Yes, show me
+              </button>
+              <button
+                type="button"
+                onClick={() => setSuggestionDismissed(true)}
+                className="px-3 py-1 rounded-full text-[10px] font-semibold text-[#6b6b80] hover:text-[#22223b] cursor-pointer"
+              >
+                Not now
+              </button>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSuggestionDismissed(true)}
+            className="text-[#94a3b8] hover:text-[#1e293b] p-0.5 cursor-pointer shrink-0"
+            title="Dismiss"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* Floating Card: Overlaps header with negative top margin */}
       <div className="bg-[#ffffff] rounded-2xl floating-card-shadow overflow-hidden flex flex-col border border-[#c2c6d1]/35">
         {/* Real Leaflet Map — OSM base + INCOIS live WMS heatmap layer */}
