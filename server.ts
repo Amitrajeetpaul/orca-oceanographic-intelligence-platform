@@ -1,0 +1,110 @@
+import express from 'express';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+import { createServer as createViteServer } from 'vite';
+import { handleChat } from './backend/orchestrator';
+import { probePoint } from './backend/probe';
+import { getSstAt } from './backend/dataSources/copernicus';
+import { getAllRegions } from './backend/regions';
+
+dotenv.config();
+
+const COPERNICUS_REFRESH_MS = 3 * 60 * 60 * 1000; // matches copernicus.ts's cache TTL
+
+// Copernicus's subprocess-backed fetch is slow (network + CLI + auth), so we
+// warm its cache for the known regions in the background instead of making a
+// chat request wait on a cold fetch. No-op if credentials aren't configured.
+function warmCopernicusCache() {
+  if (!process.env.COPERNICUSMARINE_SERVICE_USERNAME || !process.env.COPERNICUSMARINE_SERVICE_PASSWORD) return;
+  for (const { name, coords } of getAllRegions()) {
+    getSstAt(coords.lat, coords.lon).catch((err) => console.warn(`Copernicus warm-up failed for ${name}:`, err));
+  }
+}
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
+
+  app.use(express.json());
+
+  // Health check API
+  app.get('/api/health', (req, res) => {
+    res.json({
+      status: 'ok',
+      service: 'ORCA Oceanographic Intelligence Platform',
+      hasApiKey: !!process.env.GROQ_API_KEY,
+      hasCopernicusCredentials: !!process.env.COPERNICUSMARINE_SERVICE_USERNAME && !!process.env.COPERNICUSMARINE_SERVICE_PASSWORD,
+    });
+  });
+
+  // Ocean AI Assistant endpoint — orchestrates 3 real data agents backed by 3
+  // real sources (Temperature: Copernicus Marine, falling back to INCOIS;
+  // Chlorophyll/PFZ: INCOIS; Weather: Open-Meteo), then optionally uses Groq
+  // (Llama 3.3) to synthesize a natural-language answer strictly from their
+  // live findings (see backend/orchestrator.ts).
+  app.post('/api/chat', async (req, res) => {
+    const { prompt, region = 'South Kerala Coast', role = 'fisherman' } = req.body;
+
+    if (!prompt) {
+      return res.status(400).json({ error: 'Prompt is required' });
+    }
+
+    try {
+      const result = await handleChat({ query: prompt, region, role });
+      return res.json(result);
+    } catch (error: any) {
+      console.error('Chat orchestration error:', error);
+      res.status(500).json({
+        text: 'ORCA could not reach live ocean data sources just now. Please try again in a moment.',
+        source: 'Unavailable',
+        error: error.message,
+      });
+    }
+  });
+
+  // Real-time point probe for the map — reuses the same live INCOIS WMS
+  // grid the agents use, for an arbitrary clicked lat/lon.
+  app.get('/api/probe', async (req, res) => {
+    const lat = parseFloat(req.query.lat as string);
+    const lon = parseFloat(req.query.lon as string);
+
+    if (Number.isNaN(lat) || Number.isNaN(lon)) {
+      return res.status(400).json({ error: 'lat and lon query params are required' });
+    }
+
+    try {
+      const result = await probePoint(lat, lon);
+      return res.json(result);
+    } catch (error: any) {
+      console.error('Probe error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Vite integration
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`ORCA Server running on http://0.0.0.0:${PORT}`);
+    warmCopernicusCache();
+    setInterval(warmCopernicusCache, COPERNICUS_REFRESH_MS);
+  });
+}
+
+startServer();

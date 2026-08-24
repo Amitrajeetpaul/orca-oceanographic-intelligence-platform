@@ -1,0 +1,6 @@
+{
+  "name": "ORCA - Oceanographic Intelligence Platform",
+  "description": "Evidence-backed oceanographic intelligence platform for fishermen and coastal researchers, providing real-time sea surface temperature, chlorophyll tracking, PFZ forecasts, and AI-powered maritime analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
