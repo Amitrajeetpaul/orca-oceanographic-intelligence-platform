@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { MapContainer, TileLayer, WMSTileLayer, Marker, Popup, useMapEvents, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, WMSTileLayer, Marker, Popup, AttributionControl, useMapEvents, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { MapLayer } from '../types';
@@ -109,9 +109,14 @@ export const OceanMap: React.FC<OceanMapProps> = ({ center, zoom = 9, activeLaye
         scrollWheelZoom
         className="w-full h-full"
         style={{ background: '#0d2c4d' }}
+        attributionControl={false}
       >
+        {/* Compact attribution (no "Leaflet |" branding prefix) tucked in the
+            free bottom-left corner so it doesn't collide with the centered
+            layer-toggle pills — still fulfils OSM's required credit. */}
+        <AttributionControl position="bottomleft" prefix={false} />
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
         <WMSTileLayer

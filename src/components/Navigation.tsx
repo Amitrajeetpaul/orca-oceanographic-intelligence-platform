@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { TabType, UserProfile, ThemePalette } from '../types';
 import { Anchor, Microscope, Waves, Bell, Compass, User as UserIcon, ChevronDown, Check, Palette, Sparkles } from 'lucide-react';
 
@@ -8,6 +9,58 @@ const QUICK_THEMES: { id: ThemePalette; name: string; preview: string }[] = [
   { id: 'twilight-indigo', name: 'Twilight Indigo', preview: 'from-[#4338CA] to-[#1E1B4B]' },
   { id: 'sunset-coral', name: 'Sunset Horizon', preview: 'from-[#C2410C] to-[#431407]' },
 ];
+
+// Renders dropdown content into document.body via a portal, positioned from
+// the trigger's real screen coordinates. This is the standard fix for
+// dropdowns that need to visually escape a complex ancestor tree (here: a
+// Leaflet map elsewhere on the page, whose internal panes create their own
+// stacking contexts that no amount of z-index on an ancestor could beat).
+function DropdownPortal({
+  anchorRef,
+  align,
+  onClose,
+  children,
+}: {
+  anchorRef: React.RefObject<HTMLElement | null>;
+  align: 'left' | 'right' | 'center';
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  const [pos, setPos] = useState<{ top: number; left?: number; right?: number } | null>(null);
+
+  useEffect(() => {
+    if (!anchorRef.current) return;
+    const rect = anchorRef.current.getBoundingClientRect();
+    const top = rect.bottom + 8;
+    if (align === 'right') {
+      setPos({ top, right: window.innerWidth - rect.right });
+    } else if (align === 'center') {
+      setPos({ top, left: rect.left + rect.width / 2 });
+    } else {
+      setPos({ top, left: rect.left });
+    }
+  }, [anchorRef, align]);
+
+  if (!pos) return null;
+
+  return createPortal(
+    <>
+      <div className="fixed inset-0 z-[2000]" onClick={onClose} />
+      <div
+        className="fixed z-[2001] animate-in fade-in zoom-in-95"
+        style={{
+          top: pos.top,
+          left: pos.left,
+          right: pos.right,
+          transform: align === 'center' ? 'translateX(-50%)' : undefined,
+        }}
+      >
+        {children}
+      </div>
+    </>,
+    document.body
+  );
+}
 
 interface NavigationProps {
   currentTab: TabType;
@@ -33,6 +86,8 @@ export const TopAppBar: React.FC<NavigationProps> = ({
 }) => {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [themePickerOpen, setThemePickerOpen] = useState(false);
+  const regionBtnRef = useRef<HTMLButtonElement>(null);
+  const paletteBtnRef = useRef<HTMLDivElement>(null);
 
   return (
     <header className="relative w-full h-[290px] primary-header-gradient flex flex-col items-center justify-start pt-7 pb-10 select-none shrink-0">
@@ -63,7 +118,7 @@ export const TopAppBar: React.FC<NavigationProps> = ({
         <div className="flex items-center gap-1.5">
           {/* Quick Palette Toggle Button */}
           {onUpdateUser && (
-            <div className="relative">
+            <div className="relative" ref={paletteBtnRef}>
               <button
                 type="button"
                 id="quick-palette-toggle"
@@ -75,12 +130,8 @@ export const TopAppBar: React.FC<NavigationProps> = ({
               </button>
 
               {themePickerOpen && (
-                <>
-                  <div
-                    className="fixed inset-0 z-[2000]"
-                    onClick={() => setThemePickerOpen(false)}
-                  />
-                  <div className="absolute right-0 top-full mt-2 w-48 bg-[#ffffff] text-[#22223b] rounded-2xl shadow-2xl border border-[#c2c6d1]/40 py-2 px-1.5 z-[2001] animate-in fade-in zoom-in-95">
+                <DropdownPortal anchorRef={paletteBtnRef} align="right" onClose={() => setThemePickerOpen(false)}>
+                  <div className="w-48 bg-[#ffffff] text-[#22223b] rounded-2xl shadow-2xl border border-[#c2c6d1]/40 py-2 px-1.5">
                     <div className="px-2.5 py-1 text-[9px] font-bold uppercase tracking-wider text-[#6b6b80] font-heading flex items-center justify-between">
                       <span>Gradient Palette</span>
                       <Sparkles className="w-3 h-3 text-[#1a5490]" />
@@ -112,7 +163,7 @@ export const TopAppBar: React.FC<NavigationProps> = ({
                       })}
                     </div>
                   </div>
-                </>
+                </DropdownPortal>
               )}
             </div>
           )}
@@ -139,8 +190,9 @@ export const TopAppBar: React.FC<NavigationProps> = ({
 
       {/* Dynamic Sub-header Context / Region Selector */}
       {currentTab === 'home' && (
-        <div className="mt-4 z-[2000] relative flex flex-col items-center">
+        <div className="mt-4 relative flex flex-col items-center">
           <button
+            ref={regionBtnRef}
             onClick={() => setDropdownOpen(!dropdownOpen)}
             className="flex items-center gap-1.5 text-white bg-white/15 hover:bg-white/25 rounded-full px-3.5 py-1.5 backdrop-blur-md border border-white/25 transition-all text-xs font-medium cursor-pointer shadow-xs"
           >
@@ -150,13 +202,9 @@ export const TopAppBar: React.FC<NavigationProps> = ({
           </button>
 
           {dropdownOpen && (
-            <>
-              <div
-                className="fixed inset-0 z-[2000]"
-                onClick={() => setDropdownOpen(false)}
-              />
-              <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 w-52 bg-[#ffffff] text-[#22223b] rounded-2xl shadow-2xl border border-[#c2c6d1]/40 py-2 z-[2001] animate-in fade-in zoom-in-95">
-                <div className="px-3.5 py-1 text-[9px] font-bold uppercase tracking-wider text-[#6b6b80] font-heading">
+            <DropdownPortal anchorRef={regionBtnRef} align="center" onClose={() => setDropdownOpen(false)}>
+              <div className="w-64 max-h-[60vh] overflow-y-auto bg-[#ffffff] text-[#22223b] rounded-2xl shadow-2xl border border-[#c2c6d1]/40 py-2">
+                <div className="px-3.5 py-1 text-[9px] font-bold uppercase tracking-wider text-[#6b6b80] font-heading sticky top-0 bg-[#ffffff]">
                   Maritime Monitoring Corridor
                 </div>
                 {regions.map((region) => (
@@ -174,12 +222,12 @@ export const TopAppBar: React.FC<NavigationProps> = ({
                   >
                     <span>{region}</span>
                     {selectedRegion === region && (
-                      <Check className="w-3.5 h-3.5 text-[#1a5490]" />
+                      <Check className="w-3.5 h-3.5 text-[#1a5490] shrink-0" />
                     )}
                   </button>
                 ))}
               </div>
-            </>
+            </DropdownPortal>
           )}
         </div>
       )}

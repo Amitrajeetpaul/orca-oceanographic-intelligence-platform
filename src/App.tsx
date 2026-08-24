@@ -15,11 +15,25 @@ import { ExploreView } from './components/ExploreView';
 import { AlertsView } from './components/AlertsView';
 import { ProfileView } from './components/ProfileView';
 
+// Covers India's full coastline — west coast (Gujarat down to Kerala), east
+// coast (Tamil Nadu up to West Bengal), and both island territories.
 const REGIONS = [
+  'Gujarat Coast',
+  'Maharashtra Coast',
+  'Goa Coast',
+  'Karnataka Coast',
+  'Malabar Coast',
   'South Kerala Coast',
   'Vizhinjam Coast',
   'Kochi Offshore',
-  'Malabar Coast',
+  'South Tamil Nadu',
+  'North Tamil Nadu',
+  'South Andhra Pradesh',
+  'North Andhra Pradesh',
+  'Odisha Coast',
+  'West Bengal Coast',
+  'Lakshadweep Islands',
+  'Andaman & Nicobar Islands',
   'Bay of Bengal',
 ];
 
