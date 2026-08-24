@@ -20,15 +20,16 @@ import {
   Crosshair,
   X,
   MapPin,
+  LocateFixed,
 } from 'lucide-react';
 import { SAMPLE_PROMPT_CHIPS, INITIAL_CHAT_MESSAGES } from '../data/mockData';
 import { resolveRegionCoords, findNearestRegion } from '../data/regionCoords';
+import { AgentDetailModal } from './AgentDetailModal';
+import { OceanMap, ProbeResult } from './OceanMap';
 
 // Beyond this, the nearest coastal region isn't really "nearby" — no point
 // suggesting Odisha's coast to someone standing in Delhi.
 const NEARBY_THRESHOLD_KM = 300;
-import { AgentDetailModal } from './AgentDetailModal';
-import { OceanMap, ProbeResult } from './OceanMap';
 
 interface HomeViewProps {
   selectedRegion: string;
@@ -55,6 +56,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
   const [probedLocation, setProbedLocation] = useState<ProbedLocation | null>(null);
   const [nearbySuggestion, setNearbySuggestion] = useState<{ name: string; distanceKm: number } | null>(null);
   const [suggestionDismissed, setSuggestionDismissed] = useState(false);
+  const [locationIssue, setLocationIssue] = useState<'denied' | 'unavailable' | 'unsupported' | null>(null);
+  const [locationIssueDismissed, setLocationIssueDismissed] = useState(false);
 
   const regionCoords = resolveRegionCoords(selectedRegion);
   const [mapCenter, setMapCenter] = useState(regionCoords);
@@ -66,11 +69,16 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
     }
   }, [messages, isProcessing, activeAgentSteps]);
 
-  // Ask for the phone's real GPS position once, and if it's actually near a
-  // coastal region we know about, offer to check conditions there — never
-  // blocks anything if the user denies or the browser has no geolocation.
-  useEffect(() => {
-    if (!navigator.geolocation) return;
+  // Ask for the phone's real GPS position, and if it's actually near a
+  // coastal region we know about, offer to check conditions there. Never
+  // blocks anything on failure — instead surfaces a small retryable prompt
+  // so denying it by accident (or a transient GPS timeout) isn't a dead end.
+  const requestLocation = () => {
+    if (!navigator.geolocation) {
+      setLocationIssue('unsupported');
+      return;
+    }
+    setLocationIssue(null);
     navigator.geolocation.getCurrentPosition(
       (position) => {
         const nearest = findNearestRegion({
@@ -80,12 +88,17 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
         if (nearest.distanceKm <= NEARBY_THRESHOLD_KM) {
           setNearbySuggestion(nearest);
         }
+        setLocationIssueDismissed(true);
       },
-      () => {
-        // Permission denied or unavailable — silently skip, this is a nice-to-have.
+      (error) => {
+        setLocationIssue(error.code === error.PERMISSION_DENIED ? 'denied' : 'unavailable');
       },
       { timeout: 10000, maximumAge: 10 * 60 * 1000 }
     );
+  };
+
+  useEffect(() => {
+    requestLocation();
   }, []);
 
   // Picking a new region from the dropdown should move the map there,
@@ -269,6 +282,49 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
           <button
             type="button"
             onClick={() => setSuggestionDismissed(true)}
+            className="text-[#94a3b8] hover:text-[#1e293b] p-0.5 cursor-pointer shrink-0"
+            title="Dismiss"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Location Permission Fallback — shown when geolocation was denied,
+          timed out, or isn't supported, with a one-tap retry. */}
+      {locationIssue && !locationIssueDismissed && !nearbySuggestion && (
+        <div className="mb-3 bg-white rounded-2xl floating-card-shadow border border-[#c2c6d1]/35 p-3.5 flex items-start gap-3">
+          <div className="w-8 h-8 rounded-full bg-[#f2a65a]/15 text-[#b36b00] flex items-center justify-center shrink-0">
+            <LocateFixed className="w-4 h-4" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-bold text-[#22223b]">
+              {locationIssue === 'denied'
+                ? "Location access wasn't granted"
+                : locationIssue === 'unsupported'
+                ? 'Location isn’t supported on this browser'
+                : "Couldn't get your location"}
+            </p>
+            <p className="text-[11px] text-[#6b6b80] mt-0.5">
+              {locationIssue === 'denied'
+                ? 'Turn on location for this site in your browser settings, then retry to get suggestions for your nearest coast.'
+                : 'This may be a temporary signal issue — try again.'}
+            </p>
+            {locationIssue !== 'unsupported' && (
+              <div className="flex items-center gap-2 mt-2">
+                <button
+                  type="button"
+                  onClick={requestLocation}
+                  className="px-3 py-1 rounded-full btn-primary-gradient text-white text-[10px] font-heading font-bold cursor-pointer"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setLocationIssueDismissed(true)}
             className="text-[#94a3b8] hover:text-[#1e293b] p-0.5 cursor-pointer shrink-0"
             title="Dismiss"
           >
