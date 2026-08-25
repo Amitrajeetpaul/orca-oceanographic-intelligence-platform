@@ -34,6 +34,13 @@ function extensionForContentType(contentType: string): string {
 // values already match these directly (en, hi, ta, te, ml, kn, bn, gu, mr, or).
 const SUPPORTED_WHISPER_LANGUAGES = new Set(['en', 'hi', 'ta', 'te', 'ml', 'kn', 'bn', 'gu', 'mr', 'or']);
 
+// Biases Whisper's decoding toward this app's actual vocabulary — technical
+// terms and place names it would otherwise be prone to mishearing or
+// misspelling (e.g. "chlorophyll", "PFZ", "Vizhinjam") since they're
+// uncommon/ambiguous tokens without this context.
+const DOMAIN_PROMPT =
+  'Marine weather and fisheries terms: sea surface temperature, chlorophyll, wind speed, wave height, swell, knots, nautical miles, potential fishing zone, PFZ, Exclusive Economic Zone, monsoon, cyclone, coast, harbor. Place names: Kochi, Vizhinjam, Dhanushkodi, Kerala, Tamil Nadu, Gujarat, Odisha, Lakshadweep.';
+
 export async function transcribeAudio(audio: Buffer, contentType: string, languageHint?: string): Promise<TranscriptionResult> {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error('Voice transcription is not configured.');
@@ -44,6 +51,7 @@ export async function transcribeAudio(audio: Buffer, contentType: string, langua
   form.append('file', new Blob([audio], { type: contentType }), `audio.${ext}`);
   form.append('model', GROQ_WHISPER_MODEL);
   form.append('response_format', 'verbose_json');
+  form.append('prompt', DOMAIN_PROMPT);
   if (languageHint && SUPPORTED_WHISPER_LANGUAGES.has(languageHint)) {
     form.append('language', languageHint);
   }

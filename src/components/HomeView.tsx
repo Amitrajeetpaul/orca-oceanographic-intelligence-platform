@@ -145,8 +145,20 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user, messag
     setVoiceUnsupported(false);
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
+      // Explicit constraints instead of bare `{ audio: true }` — browser
+      // defaults for these vary, and on a boat/coastal environment with
+      // wind and engine noise, noise suppression and gain control make a
+      // real difference to what Whisper actually hears.
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      // MediaRecorder's default bitrate on some browsers/platforms is low
+      // enough to blur speech; 128kbps is comfortably enough for clean
+      // voice audio without inflating upload size much.
+      const recorderOptions = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? { mimeType: 'audio/webm;codecs=opus', audioBitsPerSecond: 128000 }
+        : { audioBitsPerSecond: 128000 };
+      const recorder = new MediaRecorder(stream, recorderOptions);
       audioChunksRef.current = [];
 
       recorder.ondataavailable = (e) => {
