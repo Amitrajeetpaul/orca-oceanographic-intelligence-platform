@@ -6,7 +6,7 @@ import { checkGeofence } from './dataSources/eez';
 import { planRoute } from './route';
 import { runTemperatureAgent } from './agents/temperatureAgent';
 import { runChlorophyllAgent } from './agents/chlorophyllAgent';
-import { runWeatherAgent } from './agents/weatherAgent';
+import { runWeatherAgent, runForecastAgent } from './agents/weatherAgent';
 
 export interface ConversationTurn {
   role: 'user' | 'assistant';
@@ -158,6 +158,31 @@ async function extractRouteEndpoints(
   return { origin, destination };
 }
 
+export type TemporalIntent = { daysAhead: number; dateLabel: string } | 'too_far' | null;
+
+// Detects genuinely future-dated questions ("what about tomorrow?", "safe
+// to go out Friday?") so the orchestrator can fetch a real forecast instead
+// of quietly answering with today's live reading as if it addressed the
+// question. Returns null for "now"/no clear future reference.
+async function extractTemporalIntent(query: string, history: ConversationTurn[] = []): Promise<TemporalIntent> {
+  const today = new Date();
+  const todayStr = today.toISOString().slice(0, 10);
+  const todayDow = today.toLocaleDateString('en-US', { weekday: 'long' });
+
+  const systemPrompt = `Today is ${todayDow}, ${todayStr}. The user is asking about Indian coastal waters, possibly in a regional Indian language, possibly with voice-transcription noise. Determine if their LATEST message (using conversation history to resolve follow-ups like "what about tomorrow?") is asking about conditions on a FUTURE day, rather than right now/today/current conditions. If it's about now/today or has no clear future reference, reply with exactly: NOW. If it names a future day within the next 7 days (tomorrow, a weekday name, "in 3 days", "this weekend"), reply with ONLY: N|label — where N is an integer 1-7 (days from today) and label is a short human-readable label such as "tomorrow" or "Friday". If it asks about something more than 7 days away, reply with exactly: TOO_FAR`;
+
+  const result = await callGroq(systemPrompt, query, { maxTokens: 100, history });
+  if (!result) return null;
+  const trimmed = result.trim().toUpperCase();
+  if (trimmed === 'NOW') return null;
+  if (trimmed === 'TOO_FAR') return 'too_far';
+
+  const [nStr, label] = result.trim().split('|').map((s) => s.trim());
+  const n = parseInt(nStr, 10);
+  if (Number.isNaN(n) || n < 1 || n > 7) return null;
+  return { daysAhead: n, dateLabel: label || `${n} day(s) from now` };
+}
+
 function buildTemplateAnswer(findings: AgentFinding[], region: string, unresolvedPlace: string | null): string {
   const [temp, chl, weather] = findings;
   const prefix = unresolvedPlace
@@ -192,12 +217,20 @@ export async function handleChat(params: {
   let coords = resolveRegion(params.region);
   let region = params.region;
   let unresolvedPlace: string | null = null;
+  let temporalIntent: TemporalIntent = null;
 
   if (routeResult) {
     coords = routeResult.originCoords;
     region = routeResult.origin;
   } else {
-    const extractedPlace = await extractPlaceName(query, history);
+    // Independent Groq calls — run in parallel rather than adding another
+    // sequential round-trip to every request.
+    const [extractedPlace, intent] = await Promise.all([
+      extractPlaceName(query, history),
+      extractTemporalIntent(query, history),
+    ]);
+    temporalIntent = intent;
+
     if (extractedPlace) {
       const geocoded = await geocodePlace(extractedPlace);
       if (geocoded) {
@@ -215,10 +248,15 @@ export async function handleChat(params: {
     }
   }
 
+  const weatherPromise =
+    temporalIntent && typeof temporalIntent === 'object'
+      ? runForecastAgent(coords.lat, coords.lon, temporalIntent.daysAhead, temporalIntent.dateLabel)
+      : runWeatherAgent(coords.lat, coords.lon);
+
   const [tempFinding, chlResult, weatherFinding, geofence] = await Promise.all([
     runTemperatureAgent(coords.lat, coords.lon),
     runChlorophyllAgent(coords.lat, coords.lon),
-    runWeatherAgent(coords.lat, coords.lon),
+    weatherPromise,
     routeResult ? Promise.resolve(null) : checkGeofence(coords.lat, coords.lon),
   ]);
 
@@ -236,6 +274,12 @@ export async function handleChat(params: {
     evidenceLines += `\n- Route Planning [live weather sampled along the path]: ${routeResult.distance} from ${routeResult.origin} to ${routeResult.destination}, est. ${routeResult.estimatedTime}. ${
       routeResult.hazards.length > 0 ? `Hazards found: ${routeResult.hazards.join('; ')}.` : 'No hazardous segments found along the route.'
     }`;
+  }
+
+  if (temporalIntent && typeof temporalIntent === 'object') {
+    evidenceLines += `\n- Temporal note: the user asked about ${temporalIntent.dateLabel}, a FUTURE day. The Marine Weather & Hazards Agent above is a forecast for that day, not today. The Temperature and Chlorophyll agents above still only reflect TODAY's live reading — there is no forecast source for sea temperature or chlorophyll. You MUST make this distinction clear: state the forecast wind/wave for ${temporalIntent.dateLabel}, and if you mention SST or chlorophyll, explicitly note it's today's reading since no forecast exists for it.`;
+  } else if (temporalIntent === 'too_far') {
+    evidenceLines += `\n- Temporal note: the user asked about a day more than 7 days from now. No forecast data is available that far out. You MUST tell the user this plainly instead of guessing or using today's data as if it answers the question.`;
   }
 
   let geofenceWarning: ChatResult['geofenceWarning'];
