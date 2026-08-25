@@ -75,6 +75,11 @@ export interface ChatMessage {
     potential: 'High' | 'Moderate' | 'Low';
     coordinates?: string;
   };
+  geofenceWarning?: {
+    severity: 'inside' | 'near';
+    territory: string;
+    message: string;
+  };
 }
 
 export interface CoastalAlert {

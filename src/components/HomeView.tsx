@@ -311,6 +311,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
           hasRoute: !!data.routeData,
           routeData: data.routeData,
           pfzDetails: data.pfzDetails,
+          geofenceWarning: data.geofenceWarning,
         };
 
         setMessages((prev) => [...prev, assistantMsg]);
@@ -659,6 +660,35 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
                             <span>{hz}</span>
                           </div>
                         ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Maritime Boundary Warning — real EEZ check (VLIZ Marine Regions) */}
+                  {msg.geofenceWarning && (
+                    <div
+                      className={`p-3 rounded-xl border text-[#22223b] flex items-start gap-2 ${
+                        msg.geofenceWarning.severity === 'inside'
+                          ? 'bg-[#fde8e8] border-[#c62828]/40'
+                          : 'bg-[#fff4e5] border-[#b36b00]/30'
+                      }`}
+                    >
+                      <AlertTriangle
+                        className={`w-4 h-4 shrink-0 mt-0.5 ${
+                          msg.geofenceWarning.severity === 'inside' ? 'text-[#c62828]' : 'text-[#b36b00]'
+                        }`}
+                      />
+                      <div>
+                        <p
+                          className={`text-xs font-bold font-heading ${
+                            msg.geofenceWarning.severity === 'inside' ? 'text-[#c62828]' : 'text-[#b36b00]'
+                          }`}
+                        >
+                          {msg.geofenceWarning.severity === 'inside'
+                            ? `Foreign Waters — ${msg.geofenceWarning.territory}`
+                            : `Approaching ${msg.geofenceWarning.territory} Waters`}
+                        </p>
+                        <p className="text-[11px] text-[#424750] mt-0.5">{msg.geofenceWarning.message}</p>
                       </div>
                     </div>
                   )}

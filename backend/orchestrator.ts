@@ -2,6 +2,7 @@ import type { AgentFinding, AgentStatus, RoutePoint, LanguageCode } from '../src
 import { LANGUAGES } from '../src/data/languages';
 import { resolveRegion } from './regions';
 import { geocodePlace } from './dataSources/geocoding';
+import { checkGeofence } from './dataSources/eez';
 import { planRoute } from './route';
 import { runTemperatureAgent } from './agents/temperatureAgent';
 import { runChlorophyllAgent } from './agents/chlorophyllAgent';
@@ -39,6 +40,11 @@ export interface ChatResult {
     estimatedTime: string;
     hazards: string[];
     waypoints: RoutePoint[];
+  };
+  geofenceWarning?: {
+    severity: 'inside' | 'near';
+    territory: string;
+    message: string;
   };
 }
 
@@ -209,10 +215,11 @@ export async function handleChat(params: {
     }
   }
 
-  const [tempFinding, chlResult, weatherFinding] = await Promise.all([
+  const [tempFinding, chlResult, weatherFinding, geofence] = await Promise.all([
     runTemperatureAgent(coords.lat, coords.lon),
     runChlorophyllAgent(coords.lat, coords.lon),
     runWeatherAgent(coords.lat, coords.lon),
+    routeResult ? Promise.resolve(null) : checkGeofence(coords.lat, coords.lon),
   ]);
 
   const findings: AgentFinding[] = [tempFinding, chlResult.finding, weatherFinding];
@@ -229,6 +236,23 @@ export async function handleChat(params: {
     evidenceLines += `\n- Route Planning [live weather sampled along the path]: ${routeResult.distance} from ${routeResult.origin} to ${routeResult.destination}, est. ${routeResult.estimatedTime}. ${
       routeResult.hazards.length > 0 ? `Hazards found: ${routeResult.hazards.join('; ')}.` : 'No hazardous segments found along the route.'
     }`;
+  }
+
+  let geofenceWarning: ChatResult['geofenceWarning'];
+  if (geofence?.inForeignWaters && geofence.currentTerritory) {
+    geofenceWarning = {
+      severity: 'inside',
+      territory: geofence.currentTerritory,
+      message: `This location falls within ${geofence.currentTerritory}'s Exclusive Economic Zone, not India's. Entering foreign waters without authorization carries real legal and safety risk.`,
+    };
+    evidenceLines += `\n- Maritime Boundary [VLIZ Marine Regions EEZ dataset]: This location is INSIDE ${geofence.currentTerritory}'s Exclusive Economic Zone, not India's. This is a real legal/safety hazard — you MUST warn the user clearly and prominently, before any other information.`;
+  } else if (geofence?.nearForeignBoundary && geofence.nearbyTerritory) {
+    geofenceWarning = {
+      severity: 'near',
+      territory: geofence.nearbyTerritory,
+      message: `This location is within roughly 15nm of ${geofence.nearbyTerritory}'s Exclusive Economic Zone. Exercise caution navigating further in that direction.`,
+    };
+    evidenceLines += `\n- Maritime Boundary [VLIZ Marine Regions EEZ dataset]: This location is within roughly 15 nautical miles of ${geofence.nearbyTerritory}'s Exclusive Economic Zone boundary. Mention this caution to the user.`;
   }
 
   if (unresolvedPlace) {
@@ -263,5 +287,6 @@ export async function handleChat(params: {
           waypoints: routeResult.waypoints,
         }
       : undefined,
+    geofenceWarning,
   };
 }

@@ -1,6 +1,7 @@
 import type { RoutePoint } from '../src/types';
 import { geocodePlace } from './dataSources/geocoding';
 import { getWeather } from './dataSources/openMeteo';
+import { checkGeofence } from './dataSources/eez';
 
 export interface RouteResult {
   origin: string;
@@ -42,32 +43,42 @@ export async function planRoute(originQuery: string, destQuery: string): Promise
     };
   });
 
-  const weatherResults = await Promise.all(waypointCoords.map((c) => getWeather(c.lat, c.lon).catch(() => null)));
+  const [weatherResults, geofenceResults] = await Promise.all([
+    Promise.all(waypointCoords.map((c) => getWeather(c.lat, c.lon).catch(() => null))),
+    Promise.all(waypointCoords.map((c) => checkGeofence(c.lat, c.lon).catch(() => null))),
+  ]);
 
   const waypoints: RoutePoint[] = waypointCoords.map((c, i) => {
     const w = weatherResults[i];
-    if (!w) {
-      return { lat: c.lat, lng: c.lon, name: WAYPOINT_NAMES[i], status: 'caution', hazardReason: 'Weather data unavailable' };
-    }
+    const geofence = geofenceResults[i];
 
-    const windKts = w.windSpeedKmh / 1.852;
-    const wave = w.waveHeightM;
     let status: 'safe' | 'caution' | 'danger' = 'safe';
-    let hazardReason: string | undefined;
-
     const parts: string[] = [];
-    if (wave !== null && wave > 2) parts.push(`${wave.toFixed(1)}m swell`);
-    if (windKts > 20) parts.push(`${windKts.toFixed(0)}kt wind`);
 
-    if ((wave !== null && wave > 3) || windKts > 30) {
-      status = 'danger';
-      hazardReason = parts.join(', ');
-    } else if (parts.length > 0) {
+    if (!w) {
       status = 'caution';
-      hazardReason = parts.join(', ');
+      parts.push('Weather data unavailable');
+    } else {
+      const windKts = w.windSpeedKmh / 1.852;
+      const wave = w.waveHeightM;
+      if (wave !== null && wave > 2) parts.push(`${wave.toFixed(1)}m swell`);
+      if (windKts > 20) parts.push(`${windKts.toFixed(0)}kt wind`);
+      if ((wave !== null && wave > 3) || windKts > 30) status = 'danger';
+      else if (parts.length > 0) status = 'caution';
     }
 
-    return { lat: c.lat, lng: c.lon, name: WAYPOINT_NAMES[i], status, hazardReason };
+    // Real EEZ boundary check (VLIZ Marine Regions) — a waypoint actually
+    // inside foreign waters overrides everything else as 'danger'; being
+    // near a boundary at least bumps a 'safe' waypoint to 'caution'.
+    if (geofence?.inForeignWaters && geofence.currentTerritory) {
+      status = 'danger';
+      parts.unshift(`entering ${geofence.currentTerritory} waters`);
+    } else if (geofence?.nearForeignBoundary && geofence.nearbyTerritory) {
+      if (status === 'safe') status = 'caution';
+      parts.push(`~15nm from ${geofence.nearbyTerritory} waters`);
+    }
+
+    return { lat: c.lat, lng: c.lon, name: WAYPOINT_NAMES[i], status, hazardReason: parts.length > 0 ? parts.join(', ') : undefined };
   });
 
   const distanceNm = haversineNm(origin, dest);
