@@ -10,7 +10,11 @@ export interface TranscriptionResult {
   language: string | null;
 }
 
-const GROQ_WHISPER_MODEL = 'whisper-large-v3-turbo';
+// The full-accuracy model, not the faster "turbo" variant — turbo trades
+// away multilingual/language-ID accuracy for speed, and that accuracy is
+// exactly what matters for short Indic-language utterances (confirmed by
+// testing: turbo misidentified a Bengali sample as Gujarati).
+const GROQ_WHISPER_MODEL = 'whisper-large-v3';
 
 function extensionForContentType(contentType: string): string {
   if (contentType.includes('webm')) return 'webm';
