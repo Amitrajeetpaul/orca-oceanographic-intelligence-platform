@@ -7,6 +7,16 @@ import { runTemperatureAgent } from './agents/temperatureAgent';
 import { runChlorophyllAgent } from './agents/chlorophyllAgent';
 import { runWeatherAgent } from './agents/weatherAgent';
 
+export interface ConversationTurn {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+// How many prior turns to carry into each Groq call — enough for real
+// follow-up continuity ("what about tomorrow?", "and near Kochi?") without
+// blowing up the prompt budget of a low-reasoning-effort call.
+const MAX_HISTORY_TURNS = 8;
+
 export interface ChatResult {
   text: string;
   source: string;
@@ -45,9 +55,17 @@ function toAgentStatus(f: AgentFinding): AgentStatus {
 
 const GROQ_MODEL = 'openai/gpt-oss-20b';
 
-async function callGroq(systemPrompt: string, userContent: string, opts: { maxTokens?: number; temperature?: number } = {}): Promise<string | null> {
+async function callGroq(
+  systemPrompt: string,
+  userContent: string,
+  opts: { maxTokens?: number; temperature?: number; history?: ConversationTurn[] } = {}
+): Promise<string | null> {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) return null;
+
+  const historyMessages = (opts.history ?? [])
+    .slice(-MAX_HISTORY_TURNS)
+    .map((t) => ({ role: t.role, content: t.text }));
 
   try {
     const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -60,6 +78,7 @@ async function callGroq(systemPrompt: string, userContent: string, opts: { maxTo
         model: GROQ_MODEL,
         messages: [
           { role: 'system', content: systemPrompt },
+          ...historyMessages,
           { role: 'user', content: userContent },
         ],
         temperature: opts.temperature ?? 0,
@@ -84,6 +103,7 @@ async function synthesizeWithGroq(params: {
   role: string;
   evidenceLines: string;
   preferredLanguage?: LanguageCode;
+  history?: ConversationTurn[];
 }): Promise<string | null> {
   const fallbackLabel = params.preferredLanguage
     ? LANGUAGES.find((l) => l.code === params.preferredLanguage)?.label
@@ -95,29 +115,37 @@ IMPORTANT — language: detect the language the user's question is written in (E
     fallbackLabel ? `, prefer ${fallbackLabel} (the user's saved preference)` : ', default to English'
   }.
 
+IMPORTANT — conversation memory: prior turns are provided as message history for CONTEXT ONLY — use them to resolve references like "there", "that place", or "again", and to avoid repeating yourself verbatim. Never reuse a number or fact from an earlier turn in this answer — every number you state must come from the fresh Evidence block below, since conditions may have changed since the last message.
+
 Evidence:
 ${params.evidenceLines}`;
 
-  return callGroq(systemPrompt, params.query, { temperature: 0.4 });
+  return callGroq(systemPrompt, params.query, { temperature: 0.4, history: params.history });
 }
 
 // Lets a user ask about any place ("Marina Beach", "Kovalam") in free text,
 // in any language, instead of being limited to the fixed region dropdown.
-// Returns null if no specific place is mentioned (or Groq is unavailable).
-async function extractPlaceName(query: string): Promise<string | null> {
-  const systemPrompt = `Extract the core place, city, or beach name mentioned in the user's question about Indian coastal waters — the question may be in English or any Indian regional language. Strip generic descriptor words like "coast", "sea", "waters", "area" unless they're part of the official name (e.g. keep "Marina Beach" as-is, but for "Chennai coast" extract just "Chennai"). Reply with ONLY the place name (transliterated to English/Latin script) and nothing else. If no specific place is mentioned, reply with exactly: NONE`;
+// Given conversation history, also resolves follow-ups that don't name a
+// place at all ("what about tomorrow?", "is it safe there?") by inferring
+// the place is still whatever was last discussed. Returns null only if no
+// place has ever come up (or Groq is unavailable).
+async function extractPlaceName(query: string, history: ConversationTurn[] = []): Promise<string | null> {
+  const systemPrompt = `Extract the core place, city, or beach name being discussed in the user's LATEST question about Indian coastal waters — the question may be in English or any Indian regional language. Strip generic descriptor words like "coast", "sea", "waters", "area" unless they're part of the official name (e.g. keep "Marina Beach" as-is, but for "Chennai coast" extract just "Chennai"). If the latest question doesn't name a place but is a natural follow-up to the conversation (e.g. "what about tomorrow?", "is it safe there?", "and the wind?"), infer the place from the conversation history instead. Reply with ONLY the place name (transliterated to English/Latin script) and nothing else. If no place has been mentioned anywhere in the conversation, reply with exactly: NONE`;
 
-  const result = await callGroq(systemPrompt, query, { maxTokens: 200 });
+  const result = await callGroq(systemPrompt, query, { maxTokens: 200, history });
   if (!result || result.toUpperCase() === 'NONE') return null;
   return result;
 }
 
 // Detects route-planning questions ("safest route from X to Y", "plan a path
 // to the PFZ near Z") and extracts both endpoints, in any language.
-async function extractRouteEndpoints(query: string): Promise<{ origin: string; destination: string } | null> {
-  const systemPrompt = `The user is asking about Indian coastal waters, possibly in a regional Indian language. Determine if they're asking for a ROUTE, PATH, or SAFE NAVIGATION PLAN between two specific places (a starting point and a destination). If so, reply with ONLY: ORIGIN | DESTINATION (both transliterated to English/Latin script, using real place names — no extra words). If this is not a route-planning question, or only one place is mentioned with no clear start/end, reply with exactly: NONE`;
+async function extractRouteEndpoints(
+  query: string,
+  history: ConversationTurn[] = []
+): Promise<{ origin: string; destination: string } | null> {
+  const systemPrompt = `The user is asking about Indian coastal waters, possibly in a regional Indian language. Determine if their LATEST message is asking for a ROUTE, PATH, or SAFE NAVIGATION PLAN between two specific places (a starting point and a destination) — use the conversation history to fill in an endpoint the latest message leaves implicit (e.g. "and back?" after a route was just discussed). If so, reply with ONLY: ORIGIN | DESTINATION (both transliterated to English/Latin script, using real place names — no extra words). If this is not a route-planning question, or only one place is mentioned with no clear start/end, reply with exactly: NONE`;
 
-  const result = await callGroq(systemPrompt, query, { maxTokens: 200 });
+  const result = await callGroq(systemPrompt, query, { maxTokens: 200, history });
   if (!result || result.toUpperCase() === 'NONE' || !result.includes('|')) return null;
   const [origin, destination] = result.split('|').map((s) => s.trim());
   if (!origin || !destination) return null;
@@ -146,12 +174,13 @@ export async function handleChat(params: {
   region: string;
   role: string;
   preferredLanguage?: LanguageCode;
+  history?: ConversationTurn[];
 }): Promise<ChatResult> {
-  const { query, role, preferredLanguage } = params;
+  const { query, role, preferredLanguage, history = [] } = params;
 
   // A route question resolves both endpoints via geocoding + samples real
   // weather along the path; otherwise fall back to single-place extraction.
-  const routeEndpoints = await extractRouteEndpoints(query);
+  const routeEndpoints = await extractRouteEndpoints(query, history);
   const routeResult = routeEndpoints ? await planRoute(routeEndpoints.origin, routeEndpoints.destination) : null;
 
   let coords = resolveRegion(params.region);
@@ -162,7 +191,7 @@ export async function handleChat(params: {
     coords = routeResult.originCoords;
     region = routeResult.origin;
   } else {
-    const extractedPlace = await extractPlaceName(query);
+    const extractedPlace = await extractPlaceName(query, history);
     if (extractedPlace) {
       const geocoded = await geocodePlace(extractedPlace);
       if (geocoded) {
@@ -206,7 +235,7 @@ export async function handleChat(params: {
     evidenceLines += `\n- Location lookup: the user asked about "${unresolvedPlace}", but this place could not be found. The numbers below are for the fallback region "${region}" instead, NOT for "${unresolvedPlace}". You MUST clearly tell the user "${unresolvedPlace}" could not be located, and that you're showing "${region}" instead as the nearest available data — do not present the fallback numbers as if they answer the original question.`;
   }
 
-  const synthesized = await synthesizeWithGroq({ query, region, role, evidenceLines, preferredLanguage });
+  const synthesized = await synthesizeWithGroq({ query, region, role, evidenceLines, preferredLanguage, history });
   const text = synthesized || buildTemplateAnswer(findings, region, unresolvedPlace);
 
   return {

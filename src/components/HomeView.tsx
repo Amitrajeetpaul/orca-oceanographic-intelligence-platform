@@ -267,6 +267,14 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
       ]);
     }, 1400);
 
+    // Real conversation memory for follow-ups ("what about tomorrow?") —
+    // excludes the two hardcoded demo seed messages (id 'msg-1'/'msg-2')
+    // shown before any real chat happens, since those are fabricated sample
+    // content, not something that actually occurred in this session.
+    const history = messages
+      .filter((m) => !m.id.startsWith('msg-'))
+      .map((m) => ({ role: m.sender, text: m.text }));
+
     // Step 4: Finalize Merged Consensus
     try {
       const response = await fetch('/api/chat', {
@@ -278,6 +286,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
           layer: activeLayer,
           role: user.role,
           preferredLanguage: user.language,
+          history,
         }),
       });
 

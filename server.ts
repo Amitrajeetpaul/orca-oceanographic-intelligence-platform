@@ -51,14 +51,14 @@ async function startServer() {
   // synthesize a natural-language answer strictly from their live findings
   // (see backend/orchestrator.ts).
   app.post('/api/chat', async (req, res) => {
-    const { prompt, region = 'South Kerala Coast', role = 'fisherman', preferredLanguage } = req.body;
+    const { prompt, region = 'South Kerala Coast', role = 'fisherman', preferredLanguage, history } = req.body;
 
     if (!prompt) {
       return res.status(400).json({ error: 'Prompt is required' });
     }
 
     try {
-      const result = await handleChat({ query: prompt, region, role, preferredLanguage });
+      const result = await handleChat({ query: prompt, region, role, preferredLanguage, history });
       return res.json(result);
     } catch (error: any) {
       console.error('Chat orchestration error:', error);
