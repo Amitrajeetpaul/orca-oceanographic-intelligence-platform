@@ -1,10 +1,15 @@
 // Sends recorded audio to Groq's hosted Whisper model for transcription.
-// Whisper natively auto-detects the spoken language, so unlike the
-// browser's Web Speech API (which requires picking one language upfront
-// and mangles anything spoken in a different one — a real bug we hit
-// where a Bengali voice query came out as garbled English text), this
-// actually understands whatever language the user speaks, matching how
-// voice input works in ChatGPT and similar assistants.
+//
+// Pure auto-detection (no language hint) sounds ideal, but real-world
+// audio — background noise, a short phrase, an average phone mic — gives
+// Whisper's language-ID step far less signal than a clean clip, and it
+// measurably mixes up related scripts/languages under those conditions
+// (confirmed in testing, and reported by real usage: Bengali coming back
+// in the wrong script). Passing a `language` hint skips that guessing
+// step entirely and transcribes directly in the given language, which is
+// dramatically more reliable — the same tradeoff production voice apps
+// make. We use the user's saved profile language as that hint by default,
+// falling back to true auto-detect only when none is set.
 export interface TranscriptionResult {
   text: string;
   language: string | null;
@@ -25,7 +30,11 @@ function extensionForContentType(contentType: string): string {
   return 'webm';
 }
 
-export async function transcribeAudio(audio: Buffer, contentType: string): Promise<TranscriptionResult> {
+// Whisper's ISO-639-1 codes for the languages we support — our LanguageCode
+// values already match these directly (en, hi, ta, te, ml, kn, bn, gu, mr, or).
+const SUPPORTED_WHISPER_LANGUAGES = new Set(['en', 'hi', 'ta', 'te', 'ml', 'kn', 'bn', 'gu', 'mr', 'or']);
+
+export async function transcribeAudio(audio: Buffer, contentType: string, languageHint?: string): Promise<TranscriptionResult> {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error('Voice transcription is not configured.');
   if (!audio || audio.length === 0) throw new Error('No audio received.');
@@ -35,8 +44,9 @@ export async function transcribeAudio(audio: Buffer, contentType: string): Promi
   form.append('file', new Blob([audio], { type: contentType }), `audio.${ext}`);
   form.append('model', GROQ_WHISPER_MODEL);
   form.append('response_format', 'verbose_json');
-  // No `language` param — this is the whole point: let Whisper detect it
-  // rather than forcing whatever the UI's language picker happens to be set to.
+  if (languageHint && SUPPORTED_WHISPER_LANGUAGES.has(languageHint)) {
+    form.append('language', languageHint);
+  }
 
   const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
     method: 'POST',

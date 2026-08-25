@@ -72,12 +72,17 @@ async function startServer() {
   });
 
   // Voice input transcription — forwards raw recorded audio to Groq's
-  // Whisper model, which auto-detects the spoken language (any Indian
-  // language or English) instead of requiring the client to pre-select one.
+  // Whisper model. An optional `language` query param (the user's saved
+  // profile language) is passed through as a strong hint: real-world audio
+  // gives Whisper's auto-detect far less signal than a clean clip and it
+  // measurably mixes up related scripts under those conditions, so a known
+  // hint is far more reliable than guessing. Omitting it falls back to
+  // true auto-detect.
   app.post('/api/transcribe', express.raw({ type: () => true, limit: '25mb' }), async (req, res) => {
     try {
       const contentType = (req.headers['content-type'] as string) || 'audio/webm';
-      const result = await transcribeAudio(req.body as Buffer, contentType);
+      const languageHint = req.query.language as string | undefined;
+      const result = await transcribeAudio(req.body as Buffer, contentType, languageHint);
       return res.json(result);
     } catch (error: any) {
       console.error('Transcription error:', error);

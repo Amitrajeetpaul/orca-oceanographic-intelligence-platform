@@ -162,7 +162,13 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user, messag
 
         setIsTranscribing(true);
         try {
-          const res = await fetch('/api/transcribe', {
+          // The saved profile language is passed as a hint — real-world
+          // audio (background noise, short phrases, phone mics) gives
+          // Whisper's auto-detect far less signal than a clean clip and it
+          // measurably confuses related scripts under those conditions, so
+          // a known hint transcribes far more reliably than guessing.
+          const langParam = user.language ? `?language=${encodeURIComponent(user.language)}` : '';
+          const res = await fetch(`/api/transcribe${langParam}`, {
             method: 'POST',
             headers: { 'Content-Type': audioBlob.type || 'audio/webm' },
             body: audioBlob,
