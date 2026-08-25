@@ -30,6 +30,12 @@ interface DailyValue {
   value: number;
 }
 
+interface RegionConditions {
+  salinityPsu: number | null;
+  windKts: number | null;
+  waveHeightM: number | null;
+}
+
 function seriesRange(history: DailyValue[] | null): [number, number] {
   if (!history || history.length === 0) return [0, 1];
   const values = history.map((d) => d.value);
@@ -78,6 +84,8 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
   const [sstHistory, setSstHistory] = useState<DailyValue[] | null>(null);
   const [chlHistory, setChlHistory] = useState<DailyValue[] | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [conditionsA, setConditionsA] = useState<RegionConditions | null>(null);
+  const [conditionsB, setConditionsB] = useState<RegionConditions | null>(null);
 
   const metricA = REGIONAL_METRICS[regionA] || REGIONAL_METRICS.Vizhinjam;
   const metricB = REGIONAL_METRICS[regionB] || REGIONAL_METRICS.Kochi;
@@ -109,6 +117,31 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
       cancelled = true;
     };
   }, [subTab, selectedRegion]);
+
+  // Real surface salinity (Copernicus Marine) + wind/wave (Open-Meteo) for
+  // the two regions being compared — replaces the old fully-mock buoy card.
+  useEffect(() => {
+    if (subTab !== 'research') return;
+    let cancelled = false;
+
+    const fetchConditions = (regionName: string, setter: (c: RegionConditions | null) => void) => {
+      fetch(`/api/conditions?region=${encodeURIComponent(regionName)}`)
+        .then((res) => res.json())
+        .then((data) => {
+          if (!cancelled) setter({ salinityPsu: data.salinityPsu, windKts: data.windKts, waveHeightM: data.waveHeightM });
+        })
+        .catch(() => {
+          if (!cancelled) setter(null);
+        });
+    };
+
+    fetchConditions(metricA.regionName, setConditionsA);
+    fetchConditions(metricB.regionName, setConditionsB);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [subTab, regionA, regionB]);
 
   const handleProbe = (lat: number, lon: number, result: ProbeResult | null) => {
     if (!result) {
@@ -304,15 +337,21 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                 <span className="font-heading font-bold text-[#1a5490]">{metricA.regionName}</span>
                 <div className="flex justify-between text-[#424750]">
                   <span>Salinity:</span>
-                  <span className="font-mono font-bold">{metricA.buoyMetrics.salinity}</span>
+                  <span className="font-mono font-bold">
+                    {conditionsA?.salinityPsu != null ? `${conditionsA.salinityPsu.toFixed(1)} PSU` : '—'}
+                  </span>
                 </div>
                 <div className="flex justify-between text-[#424750]">
-                  <span>Thermocline:</span>
-                  <span className="font-mono font-bold">{metricA.buoyMetrics.thermoclineDepth}</span>
+                  <span>Wind Speed:</span>
+                  <span className="font-mono font-bold">
+                    {conditionsA?.windKts != null ? `${conditionsA.windKts.toFixed(0)} kts` : '—'}
+                  </span>
                 </div>
                 <div className="flex justify-between text-[#424750]">
                   <span>Wave Height:</span>
-                  <span className="font-mono font-bold">{metricA.buoyMetrics.waveHeight}</span>
+                  <span className="font-mono font-bold">
+                    {conditionsA?.waveHeightM != null ? `${conditionsA.waveHeightM.toFixed(1)} m` : '—'}
+                  </span>
                 </div>
               </div>
 
@@ -320,15 +359,21 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                 <span className="font-heading font-bold text-[#1a5490]">{metricB.regionName}</span>
                 <div className="flex justify-between text-[#424750]">
                   <span>Salinity:</span>
-                  <span className="font-mono font-bold">{metricB.buoyMetrics.salinity}</span>
+                  <span className="font-mono font-bold">
+                    {conditionsB?.salinityPsu != null ? `${conditionsB.salinityPsu.toFixed(1)} PSU` : '—'}
+                  </span>
                 </div>
                 <div className="flex justify-between text-[#424750]">
-                  <span>Thermocline:</span>
-                  <span className="font-mono font-bold">{metricB.buoyMetrics.thermoclineDepth}</span>
+                  <span>Wind Speed:</span>
+                  <span className="font-mono font-bold">
+                    {conditionsB?.windKts != null ? `${conditionsB.windKts.toFixed(0)} kts` : '—'}
+                  </span>
                 </div>
                 <div className="flex justify-between text-[#424750]">
                   <span>Wave Height:</span>
-                  <span className="font-mono font-bold">{metricB.buoyMetrics.waveHeight}</span>
+                  <span className="font-mono font-bold">
+                    {conditionsB?.waveHeightM != null ? `${conditionsB.waveHeightM.toFixed(1)} m` : '—'}
+                  </span>
                 </div>
               </div>
             </div>

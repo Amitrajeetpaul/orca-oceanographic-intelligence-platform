@@ -5,7 +5,6 @@ import {
   AgentStatus,
   UserProfile,
   AgentFinding,
-  LanguageCode,
 } from '../types';
 import {
   Thermometer,
@@ -28,22 +27,9 @@ import {
 } from 'lucide-react';
 import { SAMPLE_PROMPT_CHIPS, INITIAL_CHAT_MESSAGES } from '../data/mockData';
 import { resolveRegionCoords, findNearestRegion } from '../data/regionCoords';
-import { LANGUAGES, resolveLanguage, detectScriptLanguage } from '../data/languages';
+import { resolveLanguage, detectScriptLanguage } from '../data/languages';
 import { AgentDetailModal } from './AgentDetailModal';
 import { OceanMap, ProbeResult } from './OceanMap';
-
-// Web Speech API isn't in TypeScript's default DOM lib — minimal shape for
-// what we actually use, backed by SpeechRecognition / webkitSpeechRecognition.
-interface SpeechRecognitionLike {
-  lang: string;
-  interimResults: boolean;
-  maxAlternatives: number;
-  onresult: ((event: any) => void) | null;
-  onerror: ((event: any) => void) | null;
-  onend: (() => void) | null;
-  start: () => void;
-  stop: () => void;
-}
 
 // Beyond this, the nearest coastal region isn't really "nearby" — no point
 // suggesting Odisha's coast to someone standing in Delhi.
@@ -71,11 +57,12 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
   const [inspectedFindings, setInspectedFindings] = useState<AgentFinding[] | null>(null);
   const [inspectedQuery, setInspectedQuery] = useState<string>('');
   const [probedLocation, setProbedLocation] = useState<ProbedLocation | null>(null);
-  const [voiceLang, setVoiceLang] = useState<LanguageCode>(user.language || 'en');
   const [isListening, setIsListening] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [voiceUnsupported, setVoiceUnsupported] = useState(false);
   const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null);
-  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
   const [nearbySuggestion, setNearbySuggestion] = useState<{ name: string; distanceKm: number } | null>(null);
   const [suggestionDismissed, setSuggestionDismissed] = useState(false);
   const [locationIssue, setLocationIssue] = useState<'denied' | 'unavailable' | 'unsupported' | null>(null);
@@ -143,34 +130,63 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
     });
   };
 
-  // Voice input via the browser's native Speech Recognition — free, no
-  // backend involved. Auto-sends the transcript once recognized.
-  const startListening = () => {
-    const SpeechRecognitionCtor =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognitionCtor) {
+  // Voice input: records real microphone audio and sends it to the backend,
+  // which transcribes it with Groq's Whisper model. Whisper auto-detects the
+  // spoken language on its own — unlike the browser's native Speech
+  // Recognition API, which locks to one pre-selected language and mangles
+  // anything spoken in a different one, this understands whatever language
+  // the user actually speaks without them having to pick it first.
+  const startListening = async () => {
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
       setVoiceUnsupported(true);
       return;
     }
     setVoiceUnsupported(false);
-    const recognition: SpeechRecognitionLike = new SpeechRecognitionCtor();
-    recognition.lang = resolveLanguage(voiceLang).speechCode;
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
-    recognition.onresult = (event: any) => {
-      const transcript = event.results?.[0]?.[0]?.transcript;
-      if (transcript) handleSendMessage(transcript);
-    };
-    recognition.onerror = () => setIsListening(false);
-    recognition.onend = () => setIsListening(false);
-    recognitionRef.current = recognition;
-    recognition.start();
-    setIsListening(true);
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((track) => track.stop());
+        setIsListening(false);
+
+        const audioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        if (audioBlob.size === 0) return;
+
+        setIsTranscribing(true);
+        try {
+          const res = await fetch('/api/transcribe', {
+            method: 'POST',
+            headers: { 'Content-Type': audioBlob.type || 'audio/webm' },
+            body: audioBlob,
+          });
+          if (res.ok) {
+            const { text } = await res.json();
+            if (text) handleSendMessage(text);
+          }
+        } catch {
+          // Silent failure — no live server data to lose here, user can just retry.
+        } finally {
+          setIsTranscribing(false);
+        }
+      };
+
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setIsListening(true);
+    } catch {
+      setVoiceUnsupported(true);
+    }
   };
 
   const stopListening = () => {
-    recognitionRef.current?.stop();
-    setIsListening(false);
+    mediaRecorderRef.current?.stop();
   };
 
   // Voice output via the browser's native Speech Synthesis — detects the
@@ -261,6 +277,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
           region: selectedRegion,
           layer: activeLayer,
           role: user.role,
+          preferredLanguage: user.language,
         }),
       });
 
@@ -734,25 +751,11 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
               }}
               className="flex items-center gap-1.5"
             >
-              <select
-                value={voiceLang}
-                onChange={(e) => setVoiceLang(e.target.value as LanguageCode)}
-                disabled={isProcessing}
-                title="Voice input language"
-                className="shrink-0 bg-[#fafaf7] border border-[#c2c6d1]/50 text-[#22223b] rounded-full py-2.5 px-1.5 text-[10px] shadow-inner focus:outline-hidden cursor-pointer max-w-[52px]"
-              >
-                {LANGUAGES.map((l) => (
-                  <option key={l.code} value={l.code}>
-                    {l.code.toUpperCase()}
-                  </option>
-                ))}
-              </select>
-
               <button
                 type="button"
                 onClick={isListening ? stopListening : startListening}
-                disabled={isProcessing}
-                title={isListening ? 'Stop listening' : 'Ask by voice'}
+                disabled={isProcessing || isTranscribing}
+                title={isListening ? 'Stop and send' : 'Ask by voice — speak in any language'}
                 className={`shrink-0 w-9 h-9 rounded-full flex items-center justify-center cursor-pointer transition-all active:scale-95 shadow-xs border ${
                   isListening
                     ? 'bg-[#c62828] text-white border-[#c62828] animate-pulse'
@@ -768,7 +771,13 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
                   onChange={(e) => setInputValue(e.target.value)}
                   disabled={isProcessing}
                   className="w-full bg-[#fafaf7] border border-[#c2c6d1]/50 focus:border-[#1a5490] text-[#22223b] placeholder:text-[#6b6b80] rounded-full py-2.5 pl-4 pr-10 text-xs shadow-inner focus:outline-hidden"
-                  placeholder={isListening ? 'Listening…' : 'Ask in any language, or use the mic...'}
+                  placeholder={
+                    isListening
+                      ? 'Listening… speak any language, tap to send'
+                      : isTranscribing
+                      ? 'Transcribing…'
+                      : 'Ask in any language, or use the mic...'
+                  }
                   type="text"
                 />
                 <button

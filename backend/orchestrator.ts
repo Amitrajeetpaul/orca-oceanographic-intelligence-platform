@@ -1,4 +1,5 @@
-import type { AgentFinding, AgentStatus, RoutePoint } from '../src/types';
+import type { AgentFinding, AgentStatus, RoutePoint, LanguageCode } from '../src/types';
+import { LANGUAGES } from '../src/data/languages';
 import { resolveRegion } from './regions';
 import { geocodePlace } from './dataSources/geocoding';
 import { planRoute } from './route';
@@ -82,10 +83,17 @@ async function synthesizeWithGroq(params: {
   region: string;
   role: string;
   evidenceLines: string;
+  preferredLanguage?: LanguageCode;
 }): Promise<string | null> {
+  const fallbackLabel = params.preferredLanguage
+    ? LANGUAGES.find((l) => l.code === params.preferredLanguage)?.label
+    : null;
+
   const systemPrompt = `You are ORCA, a marine intelligence assistant for Indian coastal waters. A user (role: ${params.role}) asked about region "${params.region}". Three specialized agents just gathered LIVE evidence below. Write a 2-4 sentence answer using ONLY the numbers and facts given below — never invent a number that isn't listed. If an agent reports "Unavailable" or low confidence, say so plainly instead of guessing. Do not add a source citation line, one is appended separately.
 
-IMPORTANT — language: detect the language the user's question is written in (English, or any Indian regional language such as Hindi, Tamil, Telugu, Malayalam, Kannada, Bengali, Gujarati, Marathi, or Odia — the question could be in any of these, including transliterated into Latin script). Reply in that SAME language and script the user used. If the language is genuinely ambiguous, default to English.
+IMPORTANT — language: detect the language the user's question is written in (English, or any Indian regional language such as Hindi, Tamil, Telugu, Malayalam, Kannada, Bengali, Gujarati, Marathi, or Odia — the question could be in any of these, including transliterated into Latin script, or contain minor transcription noise from voice input). Reply in that SAME language and script the user used. If the language is genuinely ambiguous${
+    fallbackLabel ? `, prefer ${fallbackLabel} (the user's saved preference)` : ', default to English'
+  }.
 
 Evidence:
 ${params.evidenceLines}`;
@@ -133,8 +141,13 @@ function buildTemplateAnswer(findings: AgentFinding[], region: string, unresolve
   );
 }
 
-export async function handleChat(params: { query: string; region: string; role: string }): Promise<ChatResult> {
-  const { query, role } = params;
+export async function handleChat(params: {
+  query: string;
+  region: string;
+  role: string;
+  preferredLanguage?: LanguageCode;
+}): Promise<ChatResult> {
+  const { query, role, preferredLanguage } = params;
 
   // A route question resolves both endpoints via geocoding + samples real
   // weather along the path; otherwise fall back to single-place extraction.
@@ -193,7 +206,7 @@ export async function handleChat(params: { query: string; region: string; role: 
     evidenceLines += `\n- Location lookup: the user asked about "${unresolvedPlace}", but this place could not be found. The numbers below are for the fallback region "${region}" instead, NOT for "${unresolvedPlace}". You MUST clearly tell the user "${unresolvedPlace}" could not be located, and that you're showing "${region}" instead as the nearest available data — do not present the fallback numbers as if they answer the original question.`;
   }
 
-  const synthesized = await synthesizeWithGroq({ query, region, role, evidenceLines });
+  const synthesized = await synthesizeWithGroq({ query, region, role, evidenceLines, preferredLanguage });
   const text = synthesized || buildTemplateAnswer(findings, region, unresolvedPlace);
 
   return {

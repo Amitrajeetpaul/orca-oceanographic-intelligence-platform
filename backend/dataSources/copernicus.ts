@@ -10,6 +10,10 @@ interface DatasetConfig {
   datasetId: string;
   variable: string;
   convert?: (raw: number) => number;
+  /** [min, max] depth in meters — needed for 3D ocean-physics datasets (e.g.
+   * salinity) so the CLI pulls only the surface layer instead of the full
+   * water-column profile. */
+  depthRange?: [number, number];
 }
 
 // Met Office OSTIA global L4 SST, daily NRT.
@@ -27,6 +31,14 @@ const SST_CONFIG: DatasetConfig = {
 const CHL_CONFIG: DatasetConfig = {
   datasetId: 'cmems_obs-oc_glo_bgc-plankton_nrt_l4-gapfree-multi-4km_P1D',
   variable: 'CHL',
+};
+
+// Global ocean physics analysis/forecast, surface-layer salinity.
+// https://data.marine.copernicus.eu/product/GLOBAL_ANALYSISFORECAST_PHY_001_024
+const SALINITY_CONFIG: DatasetConfig = {
+  datasetId: 'cmems_mod_glo_phy-so_anfc_0.083deg_P1D-m',
+  variable: 'so',
+  depthRange: [0, 1],
 };
 
 export interface CopernicusReading {
@@ -87,6 +99,7 @@ async function fetchDailySeries(config: DatasetConfig, lat: number, lon: number,
         '-Y', String(lat + half),
         '-t', start.toISOString(),
         '-T', now.toISOString(),
+        ...(config.depthRange ? ['-z', String(config.depthRange[0]), '-Z', String(config.depthRange[1])] : []),
         '--file-format', 'csv',
         '-o', tmpDir,
         '-f', outFile,
@@ -198,6 +211,10 @@ export function getSstAt(lat: number, lon: number): Promise<CopernicusReading> {
 
 export function getChlAt(lat: number, lon: number): Promise<CopernicusReading> {
   return getReading('chl', CHL_CONFIG, lat, lon);
+}
+
+export function getSalinityAt(lat: number, lon: number): Promise<CopernicusReading> {
+  return getReading('sal', SALINITY_CONFIG, lat, lon);
 }
 
 export function getSstHistory(lat: number, lon: number, days = 30): Promise<DailyValue[]> {

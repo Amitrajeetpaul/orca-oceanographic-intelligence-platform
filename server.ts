@@ -4,7 +4,9 @@ import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import { handleChat } from './backend/orchestrator';
 import { probePoint } from './backend/probe';
-import { getSstAt, getChlAt, getSstHistory, getChlHistory } from './backend/dataSources/copernicus';
+import { transcribeAudio } from './backend/transcribe';
+import { getSstAt, getChlAt, getSstHistory, getChlHistory, getSalinityAt } from './backend/dataSources/copernicus';
+import { getWeather } from './backend/dataSources/openMeteo';
 import { getAllRegions, resolveRegion } from './backend/regions';
 
 dotenv.config();
@@ -49,14 +51,14 @@ async function startServer() {
   // synthesize a natural-language answer strictly from their live findings
   // (see backend/orchestrator.ts).
   app.post('/api/chat', async (req, res) => {
-    const { prompt, region = 'South Kerala Coast', role = 'fisherman' } = req.body;
+    const { prompt, region = 'South Kerala Coast', role = 'fisherman', preferredLanguage } = req.body;
 
     if (!prompt) {
       return res.status(400).json({ error: 'Prompt is required' });
     }
 
     try {
-      const result = await handleChat({ query: prompt, region, role });
+      const result = await handleChat({ query: prompt, region, role, preferredLanguage });
       return res.json(result);
     } catch (error: any) {
       console.error('Chat orchestration error:', error);
@@ -65,6 +67,20 @@ async function startServer() {
         source: 'Unavailable',
         error: error.message,
       });
+    }
+  });
+
+  // Voice input transcription — forwards raw recorded audio to Groq's
+  // Whisper model, which auto-detects the spoken language (any Indian
+  // language or English) instead of requiring the client to pre-select one.
+  app.post('/api/transcribe', express.raw({ type: () => true, limit: '25mb' }), async (req, res) => {
+    try {
+      const contentType = (req.headers['content-type'] as string) || 'audio/webm';
+      const result = await transcribeAudio(req.body as Buffer, contentType);
+      return res.json(result);
+    } catch (error: any) {
+      console.error('Transcription error:', error);
+      res.status(500).json({ error: error.message });
     }
   });
 
@@ -103,6 +119,30 @@ async function startServer() {
       return res.json({ region, coords, sst, chl });
     } catch (error: any) {
       console.error('History error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Real maritime conditions for Explore's region-comparison card — surface
+  // salinity from Copernicus Marine physics, wind/wave from Open-Meteo.
+  app.get('/api/conditions', async (req, res) => {
+    const region = (req.query.region as string) || 'South Kerala Coast';
+    const coords = resolveRegion(region);
+
+    try {
+      const [salinity, weather] = await Promise.all([
+        getSalinityAt(coords.lat, coords.lon),
+        getWeather(coords.lat, coords.lon).catch(() => null),
+      ]);
+      return res.json({
+        region,
+        coords,
+        salinityPsu: salinity.value,
+        windKts: weather ? weather.windSpeedKmh / 1.852 : null,
+        waveHeightM: weather ? weather.waveHeightM : null,
+      });
+    } catch (error: any) {
+      console.error('Conditions error:', error);
       res.status(500).json({ error: error.message });
     }
   });
