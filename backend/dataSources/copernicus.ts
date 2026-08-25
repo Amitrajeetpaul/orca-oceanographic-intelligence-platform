@@ -83,7 +83,7 @@ async function fetchViaCli(config: DatasetConfig, lat: number, lon: number): Pro
         '--password', process.env.COPERNICUSMARINE_SERVICE_PASSWORD!,
       ],
       {
-        timeout: 45000,
+        timeout: 60000,
         // Each process only subsets a handful of pixels — it doesn't need
         // numpy/OpenBLAS's default of one thread per host CPU. Left
         // uncapped, concurrent subprocesses (e.g. the startup cache warm-up)
