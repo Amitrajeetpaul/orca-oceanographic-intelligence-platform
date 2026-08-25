@@ -73,34 +73,49 @@ async function callGroq(
     .slice(-MAX_HISTORY_TURNS)
     .map((t) => ({ role: t.role, content: t.text }));
 
-  try {
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          ...historyMessages,
-          { role: 'user', content: userContent },
-        ],
-        temperature: opts.temperature ?? 0,
-        ...(opts.maxTokens ? { max_tokens: opts.maxTokens, reasoning_effort: 'low' } : {}),
-      }),
-      signal: AbortSignal.timeout(opts.maxTokens ? 8000 : 10000),
-    });
+  const body = JSON.stringify({
+    model: GROQ_MODEL,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      ...historyMessages,
+      { role: 'user', content: userContent },
+    ],
+    temperature: opts.temperature ?? 0,
+    ...(opts.maxTokens ? { max_tokens: opts.maxTokens, reasoning_effort: 'low' } : {}),
+  });
 
-    if (!res.ok) throw new Error(`Groq API responded ${res.status}`);
-    const data = await res.json();
-    const text = data.choices?.[0]?.message?.content?.trim();
-    return text || null;
-  } catch (err) {
-    console.warn('Groq call failed:', err instanceof Error ? err.message : err);
-    return null;
+  // One retry on rate-limit (429) — a short burst of messages can briefly
+  // exceed Groq's per-minute token budget even with capped output; without
+  // this, every extraction/synthesis call in that window would silently
+  // fail and fall back to a generic answer instead of the real one.
+  for (let attempt = 0; attempt <= 1; attempt++) {
+    try {
+      const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body,
+        signal: AbortSignal.timeout(opts.maxTokens ? 8000 : 10000),
+      });
+
+      if (res.status === 429 && attempt === 0) {
+        const retryAfterMs = Math.min(parseFloat(res.headers.get('retry-after') || '1') * 1000, 3000);
+        await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
+        continue;
+      }
+
+      if (!res.ok) throw new Error(`Groq API responded ${res.status}`);
+      const data = await res.json();
+      const text = data.choices?.[0]?.message?.content?.trim();
+      return text || null;
+    } catch (err) {
+      console.warn('Groq call failed:', err instanceof Error ? err.message : err);
+      return null;
+    }
   }
+  return null;
 }
 
 async function synthesizeWithGroq(params: {
@@ -126,7 +141,13 @@ IMPORTANT — conversation memory: prior turns are provided as message history f
 Evidence:
 ${params.evidenceLines}`;
 
-  return callGroq(systemPrompt, params.query, { temperature: 0.4, history: params.history });
+  // maxTokens must be set here — without it, callGroq omits reasoning_effort
+  // entirely, and this reasoning model then burns an uncapped number of
+  // hidden "thinking" tokens on what should be a short 2-4 sentence answer.
+  // That was blowing through Groq's per-minute token budget in a handful of
+  // messages and silently degrading every subsequent answer to a generic
+  // fallback (confirmed via Railway logs: repeated 429s after a short burst).
+  return callGroq(systemPrompt, params.query, { temperature: 0.4, history: params.history, maxTokens: 500 });
 }
 
 // Lets a user ask about any place ("Marina Beach", "Kovalam") in free text,
