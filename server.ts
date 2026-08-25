@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import { handleChat } from './backend/orchestrator';
 import { probePoint } from './backend/probe';
-import { getSstAt } from './backend/dataSources/copernicus';
+import { getSstAt, getChlAt } from './backend/dataSources/copernicus';
 import { getAllRegions } from './backend/regions';
 
 dotenv.config();
@@ -17,7 +17,8 @@ const COPERNICUS_REFRESH_MS = 3 * 60 * 60 * 1000; // matches copernicus.ts's cac
 function warmCopernicusCache() {
   if (!process.env.COPERNICUSMARINE_SERVICE_USERNAME || !process.env.COPERNICUSMARINE_SERVICE_PASSWORD) return;
   for (const { name, coords } of getAllRegions()) {
-    getSstAt(coords.lat, coords.lon).catch((err) => console.warn(`Copernicus warm-up failed for ${name}:`, err));
+    getSstAt(coords.lat, coords.lon).catch((err) => console.warn(`Copernicus SST warm-up failed for ${name}:`, err));
+    getChlAt(coords.lat, coords.lon).catch((err) => console.warn(`Copernicus CHL warm-up failed for ${name}:`, err));
   }
 }
 
@@ -37,11 +38,11 @@ async function startServer() {
     });
   });
 
-  // Ocean AI Assistant endpoint — orchestrates 3 real data agents backed by 3
-  // real sources (Temperature: Copernicus Marine, falling back to INCOIS;
-  // Chlorophyll/PFZ: INCOIS; Weather: Open-Meteo), then optionally uses Groq
-  // (Llama 3.3) to synthesize a natural-language answer strictly from their
-  // live findings (see backend/orchestrator.ts).
+  // Ocean AI Assistant endpoint — orchestrates 3 real data agents backed by
+  // real sources (Temperature & Chlorophyll/PFZ: Copernicus Marine, falling
+  // back to INCOIS; Weather: Open-Meteo), then optionally uses Groq to
+  // synthesize a natural-language answer strictly from their live findings
+  // (see backend/orchestrator.ts).
   app.post('/api/chat', async (req, res) => {
     const { prompt, region = 'South Kerala Coast', role = 'fisherman' } = req.body;
 
