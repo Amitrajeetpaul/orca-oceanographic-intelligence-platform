@@ -3,7 +3,7 @@ import { LANGUAGES } from '../src/data/languages';
 import { resolveRegion } from './regions';
 import { geocodePlace } from './dataSources/geocoding';
 import { checkGeofence } from './dataSources/eez';
-import { planRoute } from './route';
+import { planRoute, planRouteToNearestPfz } from './route';
 import { runTemperatureAgent } from './agents/temperatureAgent';
 import { runChlorophyllAgent } from './agents/chlorophyllAgent';
 import { runWeatherAgent, runForecastAgent } from './agents/weatherAgent';
@@ -149,7 +149,7 @@ async function extractRouteEndpoints(
   query: string,
   history: ConversationTurn[] = []
 ): Promise<{ origin: string; destination: string } | null> {
-  const systemPrompt = `The user is asking about Indian coastal waters, possibly in a regional Indian language. Determine if their LATEST message is asking for a ROUTE, PATH, or SAFE NAVIGATION PLAN between two specific places (a starting point and a destination) — use the conversation history to fill in an endpoint the latest message leaves implicit (e.g. "and back?" after a route was just discussed). If so, reply with ONLY: ORIGIN | DESTINATION (both transliterated to English/Latin script, using real place names — no extra words). If this is not a route-planning question, or only one place is mentioned with no clear start/end, reply with exactly: NONE`;
+  const systemPrompt = `The user is asking about Indian coastal waters, possibly in a regional Indian language. Determine if their LATEST message is asking for a ROUTE, PATH, or SAFE NAVIGATION PLAN between a starting point and a destination — use the conversation history to fill in an endpoint the latest message leaves implicit (e.g. "and back?" after a route was just discussed). The destination is often a real named place (a port, beach, town), but if the user asks for a route to "the nearest/best fishing zone", "a good PFZ", or similar — NOT a named place — reply with ORIGIN | NEAREST_PFZ instead (using the literal text NEAREST_PFZ for the destination). If no starting point is named at all (e.g. "route to the nearest fishing zone" with no origin given), use the literal text CURRENT_LOCATION for the origin. Reply with ONLY: ORIGIN | DESTINATION (both transliterated to English/Latin script — no extra words). If this is clearly not a route-planning question, reply with exactly: NONE`;
 
   const result = await callGroq(systemPrompt, query, { maxTokens: 200, history });
   if (!result || result.toUpperCase() === 'NONE' || !result.includes('|')) return null;
@@ -209,15 +209,23 @@ export async function handleChat(params: {
 }): Promise<ChatResult> {
   const { query, role, preferredLanguage, history = [] } = params;
 
-  // A route question resolves both endpoints via geocoding + samples real
-  // weather along the path; otherwise fall back to single-place extraction.
-  const routeEndpoints = await extractRouteEndpoints(query, history);
-  const routeResult = routeEndpoints ? await planRoute(routeEndpoints.origin, routeEndpoints.destination) : null;
-
   let coords = resolveRegion(params.region);
   let region = params.region;
   let unresolvedPlace: string | null = null;
   let temporalIntent: TemporalIntent = null;
+
+  // A route question resolves both endpoints via geocoding + samples real
+  // weather along the path; otherwise fall back to single-place extraction.
+  const routeEndpoints = await extractRouteEndpoints(query, history);
+  let routeResult = null as Awaited<ReturnType<typeof planRoute>>;
+  if (routeEndpoints) {
+    const originArg =
+      routeEndpoints.origin.toUpperCase() === 'CURRENT_LOCATION' ? { displayName: region, lat: coords.lat, lon: coords.lon } : routeEndpoints.origin;
+    routeResult =
+      routeEndpoints.destination.toUpperCase() === 'NEAREST_PFZ'
+        ? await planRouteToNearestPfz(originArg)
+        : await planRoute(originArg, routeEndpoints.destination);
+  }
 
   if (routeResult) {
     coords = routeResult.originCoords;

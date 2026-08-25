@@ -2,6 +2,7 @@ import type { RoutePoint } from '../src/types';
 import { geocodePlace } from './dataSources/geocoding';
 import { getWeather } from './dataSources/openMeteo';
 import { checkGeofence } from './dataSources/eez';
+import { findNearestPfz } from './pfzSearch';
 
 export interface RouteResult {
   origin: string;
@@ -28,13 +29,17 @@ function haversineNm(a: { lat: number; lon: number }, b: { lat: number; lon: num
   return km * 0.539957; // km -> nautical miles
 }
 
-// Samples real live weather at 5 points along a straight line between origin
-// and destination — good enough for coastal hops at this scale, without
-// pulling in a full nautical-routing/land-avoidance engine.
-export async function planRoute(originQuery: string, destQuery: string): Promise<RouteResult | null> {
-  const [origin, dest] = await Promise.all([geocodePlace(originQuery), geocodePlace(destQuery)]);
-  if (!origin || !dest) return null;
+export interface NamedPoint {
+  displayName: string;
+  lat: number;
+  lon: number;
+}
 
+// Shared by both a normal two-named-place route and a route to a derived
+// "nearest fishing zone" destination — samples real live weather (and
+// geofence status) at 5 points along a straight line, good enough for
+// coastal hops at this scale without a full nautical-routing engine.
+async function buildRouteResult(origin: NamedPoint, dest: NamedPoint): Promise<RouteResult> {
   const waypointCoords = WAYPOINT_NAMES.map((_, i) => {
     const t = i / (WAYPOINT_NAMES.length - 1);
     return {
@@ -98,4 +103,32 @@ export async function planRoute(originQuery: string, destQuery: string): Promise
     hazards,
     waypoints,
   };
+}
+
+export async function planRoute(originQueryOrPoint: string | NamedPoint, destQuery: string): Promise<RouteResult | null> {
+  const [origin, dest] = await Promise.all([
+    typeof originQueryOrPoint === 'string' ? geocodePlace(originQueryOrPoint) : originQueryOrPoint,
+    geocodePlace(destQuery),
+  ]);
+  if (!origin || !dest) return null;
+  return buildRouteResult(origin, dest);
+}
+
+// For "route me to the nearest good fishing zone"-style questions, where
+// the destination isn't a real named place to geocode — it has to be
+// derived live from the same SST/chlorophyll signals INCOIS's own PFZ
+// advisories use (see pfzSearch.ts), then routed to like any other point.
+export async function planRouteToNearestPfz(originQueryOrPoint: string | NamedPoint): Promise<RouteResult | null> {
+  const origin = typeof originQueryOrPoint === 'string' ? await geocodePlace(originQueryOrPoint) : originQueryOrPoint;
+  if (!origin) return null;
+
+  const pfz = await findNearestPfz(origin.lat, origin.lon);
+  if (!pfz) return null;
+
+  const dest: NamedPoint = {
+    displayName: `Potential Fishing Zone (${pfz.potential}, ${pfz.distanceNm}nm ${pfz.bearingLabel} of ${origin.displayName})`,
+    lat: pfz.lat,
+    lon: pfz.lon,
+  };
+  return buildRouteResult(origin, dest);
 }
