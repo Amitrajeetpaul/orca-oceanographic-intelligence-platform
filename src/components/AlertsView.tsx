@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import {
   Bell,
@@ -14,23 +14,67 @@ import {
   Download,
   Sparkles,
 } from 'lucide-react';
-import { INITIAL_ALERTS, INITIAL_CHAT_MESSAGES } from '../data/mockData';
 import { CoastalAlert, ChatMessage } from '../types';
 
 interface AlertsViewProps {
   onNavigateToHome?: () => void;
+  messages: ChatMessage[];
 }
 
-export const AlertsView: React.FC<AlertsViewProps> = ({ onNavigateToHome }) => {
+export const AlertsView: React.FC<AlertsViewProps> = ({ onNavigateToHome, messages }) => {
   const [subTab, setSubTab] = useState<'notifications' | 'history'>('notifications');
   const [selectedAlert, setSelectedAlert] = useState<string | null>(null);
   const [historySearch, setHistorySearch] = useState('');
-  const [alerts, setAlerts] = useState<CoastalAlert[]>(INITIAL_ALERTS);
+  const [alerts, setAlerts] = useState<CoastalAlert[]>([]);
+  const [alertsLoading, setAlertsLoading] = useState(true);
 
-  const filteredHistory = INITIAL_CHAT_MESSAGES.filter(
-    (msg) =>
-      msg.text.toLowerCase().includes(historySearch.toLowerCase()) ||
-      (msg.source && msg.source.toLowerCase().includes(historySearch.toLowerCase()))
+  // Live hazard alerts, derived from real current conditions across every
+  // known region — refreshed periodically since underlying conditions change.
+  useEffect(() => {
+    let cancelled = false;
+    const fetchAlerts = () => {
+      fetch('/api/alerts')
+        .then((res) => res.json())
+        .then((data) => {
+          if (!cancelled) setAlerts(data.alerts || []);
+        })
+        .catch(() => {
+          if (!cancelled) setAlerts([]);
+        })
+        .finally(() => {
+          if (!cancelled) setAlertsLoading(false);
+        });
+    };
+    fetchAlerts();
+    const interval = setInterval(fetchAlerts, 10 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  // One row per real Q&A exchange — each user question paired with the
+  // assistant reply that immediately followed it (for its source/pfzDetails),
+  // reconstructed from the real session transcript rather than a mock pair.
+  const historyPairs = messages
+    .map((msg, i) => {
+      if (msg.sender !== 'user') return null;
+      const reply = messages[i + 1]?.sender === 'assistant' ? messages[i + 1] : undefined;
+      return {
+        id: msg.id,
+        text: msg.text,
+        timestamp: msg.timestamp,
+        source: reply?.source,
+        pfzDetails: reply?.pfzDetails,
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null)
+    .reverse();
+
+  const filteredHistory = historyPairs.filter(
+    (item) =>
+      item.text.toLowerCase().includes(historySearch.toLowerCase()) ||
+      (item.source && item.source.toLowerCase().includes(historySearch.toLowerCase()))
   );
 
   return (
@@ -79,6 +123,17 @@ export const AlertsView: React.FC<AlertsViewProps> = ({ onNavigateToHome }) => {
           </div>
 
           {/* Alert List Rows */}
+          {alertsLoading ? (
+            <div className="p-6 text-center text-xs text-[#6b6b80]">Checking live conditions across all regions…</div>
+          ) : alerts.length === 0 ? (
+            <div className="p-6 flex flex-col items-center gap-2 text-center">
+              <CheckCircle2 className="w-6 h-6 text-[#2e7d32]" />
+              <p className="text-xs font-semibold text-[#22223b]">No active hazards right now</p>
+              <p className="text-[10px] text-[#6b6b80]">
+                All monitored regions are currently within safe wind/wave thresholds.
+              </p>
+            </div>
+          ) : (
           <div className="divide-y divide-[#c2c6d1]/20">
             {alerts.map((alert) => {
               const isDanger = alert.severity === 'High' || alert.type === 'danger';
@@ -183,6 +238,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({ onNavigateToHome }) => {
               );
             })}
           </div>
+          )}
         </div>
       )}
 
@@ -201,6 +257,19 @@ export const AlertsView: React.FC<AlertsViewProps> = ({ onNavigateToHome }) => {
           </div>
 
           {/* History List Rows */}
+          {filteredHistory.length === 0 ? (
+            <div className="py-6 flex flex-col items-center gap-2 text-center">
+              <History className="w-6 h-6 text-[#6b6b80]" />
+              <p className="text-xs font-semibold text-[#22223b]">
+                {messages.length === 0 ? 'No questions asked yet' : 'No matches'}
+              </p>
+              <p className="text-[10px] text-[#6b6b80]">
+                {messages.length === 0
+                  ? 'Questions you ask ORCA on the Home tab will show up here.'
+                  : 'Try a different search term.'}
+              </p>
+            </div>
+          ) : (
           <div className="space-y-3">
             {filteredHistory.map((item) => (
               <div
@@ -247,6 +316,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({ onNavigateToHome }) => {
               </div>
             ))}
           </div>
+          )}
         </div>
       )}
     </main>

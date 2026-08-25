@@ -25,7 +25,7 @@ import {
   Volume2,
   Square,
 } from 'lucide-react';
-import { SAMPLE_PROMPT_CHIPS, INITIAL_CHAT_MESSAGES } from '../data/mockData';
+import { SAMPLE_PROMPT_CHIPS } from '../data/mockData';
 import { resolveRegionCoords, findNearestRegion } from '../data/regionCoords';
 import { resolveLanguage, detectScriptLanguage } from '../data/languages';
 import { AgentDetailModal } from './AgentDetailModal';
@@ -38,6 +38,8 @@ const NEARBY_THRESHOLD_KM = 300;
 interface HomeViewProps {
   selectedRegion: string;
   user: UserProfile;
+  messages: ChatMessage[];
+  setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
 }
 
 interface ProbedLocation {
@@ -48,9 +50,8 @@ interface ProbedLocation {
   potential: string;
 }
 
-export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
+export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user, messages, setMessages }) => {
   const [activeLayer, setActiveLayer] = useState<MapLayer>('Temp');
-  const [messages, setMessages] = useState<ChatMessage[]>(INITIAL_CHAT_MESSAGES);
   const [inputValue, setInputValue] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [activeAgentSteps, setActiveAgentSteps] = useState<AgentStatus[]>([]);
@@ -267,13 +268,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
       ]);
     }, 1400);
 
-    // Real conversation memory for follow-ups ("what about tomorrow?") —
-    // excludes the two hardcoded demo seed messages (id 'msg-1'/'msg-2')
-    // shown before any real chat happens, since those are fabricated sample
-    // content, not something that actually occurred in this session.
-    const history = messages
-      .filter((m) => !m.id.startsWith('msg-'))
-      .map((m) => ({ role: m.sender, text: m.text }));
+    // Real conversation memory for follow-ups ("what about tomorrow?").
+    const history = messages.map((m) => ({ role: m.sender, text: m.text }));
 
     // Step 4: Finalize Merged Consensus
     try {

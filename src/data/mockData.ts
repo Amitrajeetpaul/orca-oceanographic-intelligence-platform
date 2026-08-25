@@ -1,4 +1,4 @@
-import { CoastalAlert, RegionalMetric, UserProfile, DataSourceItem, ChatMessage } from '../types';
+import { RegionalMetric, UserProfile, DataSourceItem } from '../types';
 
 export const INITIAL_USER: UserProfile = {
   name: 'Dr. Anya Sharma',
@@ -59,65 +59,6 @@ export const DATA_SOURCES: DataSourceItem[] = [
     apiStatus: 'Scheduled Pull',
     portalUrl: 'https://oceancolor.gsfc.nasa.gov',
     description: 'Calibrated optical radiance data from MODIS-Aqua and VIIRS sensors detecting marine primary productivity.',
-  },
-];
-
-export const INITIAL_ALERTS: CoastalAlert[] = [
-  {
-    id: 'alert-1',
-    title: 'Cyclone Alert - Bay of Bengal',
-    timeAgo: '10 min ago',
-    type: 'danger',
-    description: 'Deep depression intensifying into cyclonic storm. Wind speeds exceeding 65-80 km/h with high sea swell.',
-    location: 'BAY OF BENGAL (14.2°N, 84.8°E)',
-    meta: 'SEVERITY: HIGH',
-    severity: 'High',
-    coordinates: '14.2° N, 84.8° E',
-    actionAdvice: 'All motorized fishing craft and deep-sea trawlers must return to nearest safe harbor. Sea venturing strictly prohibited.',
-    source: 'IMD & INCOIS Joint Cyclone Bulletin #04',
-    issuedAt: 'Today, 08:30 IST',
-  },
-  {
-    id: 'alert-2',
-    title: 'High Wave Warning',
-    timeAgo: '2 hrs ago',
-    type: 'warning',
-    description: 'Swell waves of 2.5m–3.2m expected along the coast. Nearshore operations should exercise extreme caution.',
-    location: 'VIZHINJAM COAST (8.38°N, 76.99°E)',
-    meta: '2.5M SWELL',
-    severity: 'Moderate',
-    coordinates: '8.38° N, 76.99° E',
-    actionAdvice: 'Small vessels under 15m should avoid harbor mouth navigation during peak ebb tide between 14:00 and 18:00 IST.',
-    source: 'INCOIS High Wave Warning System',
-    issuedAt: 'Today, 06:15 IST',
-  },
-  {
-    id: 'alert-3',
-    title: 'Favorable Fishing Zone',
-    timeAgo: '5 hrs ago',
-    type: 'success',
-    description: 'Chlorophyll plume detected 12nm SW of Vizhinjam. Sea surface temp 28.5°C. High pelagic fish aggregation likely.',
-    location: 'SOUTH KERALA SHELF',
-    meta: 'SST: 28.5°C',
-    severity: 'Notice',
-    coordinates: '8.29° N, 76.84° E',
-    actionAdvice: 'Indian Mackerel and Sardine shoals clustered at 20-35m depth column. Favorable current flow 0.45 m/s SE.',
-    source: 'INCOIS PFZ Multilingual Advisory',
-    issuedAt: 'Today, 03:30 IST',
-  },
-  {
-    id: 'alert-4',
-    title: 'Routine Buoy Maintenance',
-    timeAgo: '1 day ago',
-    type: 'info',
-    description: 'Data transmission from Station B-14 will be intermittently paused for sensor calibration between 06:00 and 12:00 UTC.',
-    location: 'OFFSHORE STATION B-14',
-    meta: 'STATION B-14',
-    severity: 'Notice',
-    coordinates: '9.93° N, 76.12° E',
-    actionAdvice: 'Moored buoy optical sensor swap. Surface warning beacon flashing yellow (Fl Y 4s). Maintain 200m clearance.',
-    source: 'NIOT Ocean Telemetry Unit',
-    issuedAt: 'Yesterday, 10:00 IST',
   },
 ];
 
@@ -287,70 +228,3 @@ export const SAMPLE_PROMPT_CHIPS = [
   'Are there any cyclone alerts near my coast?',
 ];
 
-export const INITIAL_CHAT_MESSAGES: ChatMessage[] = [
-  {
-    id: 'msg-1',
-    sender: 'user',
-    text: 'Where is the nearest good fishing zone today?',
-    timestamp: '10:42 AM',
-  },
-  {
-    id: 'msg-2',
-    sender: 'assistant',
-    text: 'A high-potential fishing zone (PFZ) is identified 12nm SW of Vizhinjam. Sea surface temperature is optimal at 28.5°C with high chlorophyll concentration (1.42 mg/m³). Current weather conditions are safe for navigation.',
-    timestamp: '10:43 AM',
-    source: 'INCOIS PFZ, Copernicus SST, Open-Meteo | Updated 2h ago',
-    agents: [
-      { name: 'Temperature agent', type: 'temp', status: 'completed', value: '28.5°C (Optimal boundary)', source: 'Copernicus Sentinel-3 SST', confidence: 94 },
-      { name: 'Chlorophyll agent', type: 'chlorophyll', status: 'completed', value: '1.42 mg/m³ (Pelagic peak)', source: 'INCOIS PFZ Advisory #42', confidence: 91 },
-      { name: 'Weather agent', type: 'weather', status: 'completed', value: '12 knots NW, 1.4m swell', source: 'Open-Meteo Marine (ECMWF)', confidence: 96 },
-    ],
-    findings: [
-      {
-        agentName: 'Temperature Agent',
-        type: 'temp',
-        sourceName: 'Copernicus Marine Service (L4 SST blend)',
-        sourceUrl: 'https://marine.copernicus.eu',
-        timestamp: '10:41 AM (2 hrs latency)',
-        confidence: 94,
-        metric: 'Sea Surface Temperature',
-        value: '28.5°C (Frontal Delta +0.6°C)',
-        rawFindings: 'Sharp thermal gradient boundary detected at 8.29°N, 76.84°E. The front creates an upwelling zone concentrating nutrient-rich cold sub-surface waters.',
-        status: 'completed',
-      },
-      {
-        agentName: 'Chlorophyll & PFZ Agent',
-        type: 'chlorophyll',
-        sourceName: 'INCOIS Live Ocean Color Advisory',
-        sourceUrl: 'https://incois.gov.in',
-        timestamp: '04:00 IST Morning Advisory Cycle',
-        confidence: 91,
-        metric: 'Phytoplankton Density',
-        value: '1.42 mg/m³ (High Aggregation)',
-        rawFindings: 'Oceansat-3 ocean color overlay confirms high chlorophyll front coincident with the thermal gradient. High probability of pelagic mackerel and sardine aggregation.',
-        status: 'completed',
-      },
-      {
-        agentName: 'Marine Weather & Hazards Agent',
-        type: 'weather',
-        sourceName: 'Open-Meteo Marine (ECMWF Wave Model)',
-        sourceUrl: 'https://open-meteo.com',
-        timestamp: '10:30 AM Real-time forecast',
-        confidence: 96,
-        metric: 'Wind & Sea State',
-        value: '12 kts NW, 1.4m Swell, 8s Period',
-        rawFindings: 'No gale warnings or lightning alerts in effect within 25nm of Vizhinjam coast. Sea state moderate (Beaufort 3-4), safe for day sailing operations.',
-        status: 'completed',
-      },
-    ],
-    pfzDetails: {
-      distance: '12nm SW of Vizhinjam',
-      bearing: '225° SW',
-      sst: '28.5°C',
-      chlorophyll: '1.42 mg/m³',
-      depth: '32m',
-      potential: 'High',
-      coordinates: '8.29° N, 76.84° E',
-    },
-  },
-];

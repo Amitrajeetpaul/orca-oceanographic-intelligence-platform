@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { TabType, UserProfile } from './types';
+import { TabType, UserProfile, ChatMessage } from './types';
 import { INITIAL_USER } from './data/mockData';
 import { TopAppBar, BottomNavBar } from './components/Navigation';
 import { LandingView } from './components/LandingView';
@@ -37,11 +37,37 @@ const REGIONS = [
   'Bay of Bengal',
 ];
 
+const CHAT_HISTORY_KEY = 'orca_chat_history';
+const MAX_STORED_MESSAGES = 100;
+
+function loadStoredMessages(): ChatMessage[] {
+  try {
+    const raw = localStorage.getItem(CHAT_HISTORY_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
 export default function App() {
   const [viewState, setViewState] = useState<'app' | 'landing' | 'login'>('landing');
   const [currentTab, setCurrentTab] = useState<TabType>('home');
   const [user, setUser] = useState<UserProfile>(INITIAL_USER);
   const [selectedRegion, setSelectedRegion] = useState<string>('South Kerala Coast');
+  // Real chat history — lifted up so it survives switching tabs (Home
+  // unmounts when you leave it) and, via localStorage, page reloads. This
+  // is what the Alerts screen's "Chat & Query History" tab reads for real,
+  // replacing the fabricated sample conversation it used to show.
+  const [messages, setMessages] = useState<ChatMessage[]>(loadStoredMessages);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(messages.slice(-MAX_STORED_MESSAGES)));
+    } catch {
+      // Storage full or unavailable (private browsing) — history just
+      // won't persist across reloads this session, nothing else breaks.
+    }
+  }, [messages]);
 
   const handleLogin = (profile: Partial<UserProfile>) => {
     setUser((prev) => ({ ...prev, ...profile }));
@@ -105,7 +131,7 @@ export default function App() {
               transition={{ duration: 0.15 }}
               className="w-full flex-1 flex flex-col"
             >
-              <HomeView selectedRegion={selectedRegion} user={user} />
+              <HomeView selectedRegion={selectedRegion} user={user} messages={messages} setMessages={setMessages} />
             </motion.div>
           )}
 
@@ -134,7 +160,7 @@ export default function App() {
               transition={{ duration: 0.15 }}
               className="w-full flex-1 flex flex-col"
             >
-              <AlertsView onNavigateToHome={() => setCurrentTab('home')} />
+              <AlertsView onNavigateToHome={() => setCurrentTab('home')} messages={messages} />
             </motion.div>
           )}
 

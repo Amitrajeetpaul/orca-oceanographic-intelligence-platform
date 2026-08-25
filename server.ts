@@ -5,6 +5,7 @@ import { createServer as createViteServer } from 'vite';
 import { handleChat } from './backend/orchestrator';
 import { probePoint } from './backend/probe';
 import { transcribeAudio } from './backend/transcribe';
+import { getLiveAlerts } from './backend/alerts';
 import { getSstAt, getChlAt, getSstHistory, getChlHistory, getSalinityAt } from './backend/dataSources/copernicus';
 import { getWeather } from './backend/dataSources/openMeteo';
 import { getAllRegions, resolveRegion } from './backend/regions';
@@ -143,6 +144,18 @@ async function startServer() {
       });
     } catch (error: any) {
       console.error('Conditions error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Live coastal hazard alerts — derived from real current conditions
+  // across every known region, not a fabricated bulletin feed.
+  app.get('/api/alerts', async (req, res) => {
+    try {
+      const alerts = await getLiveAlerts();
+      return res.json({ alerts });
+    } catch (error: any) {
+      console.error('Alerts error:', error);
       res.status(500).json({ error: error.message });
     }
   });
