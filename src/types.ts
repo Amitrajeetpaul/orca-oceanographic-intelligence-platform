@@ -4,7 +4,8 @@ export type UserRole = 'fisherman' | 'researcher';
 
 export type MapLayer = 'Temp' | 'Chlorophyll' | 'PFZ';
 
-export type LanguageCode = 'en' | 'hi' | 'ta' | 'ml';
+// Covers English plus the major languages of India's coastal states.
+export type LanguageCode = 'en' | 'hi' | 'ta' | 'te' | 'ml' | 'kn' | 'bn' | 'gu' | 'mr' | 'or';
 
 export type ThemePalette = 'deep-ocean' | 'emerald-teal' | 'twilight-indigo' | 'sunset-coral';
 

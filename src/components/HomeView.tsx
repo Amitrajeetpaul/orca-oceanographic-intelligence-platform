@@ -5,6 +5,7 @@ import {
   AgentStatus,
   UserProfile,
   AgentFinding,
+  LanguageCode,
 } from '../types';
 import {
   Thermometer,
@@ -21,11 +22,28 @@ import {
   X,
   MapPin,
   LocateFixed,
+  Mic,
+  Volume2,
+  Square,
 } from 'lucide-react';
 import { SAMPLE_PROMPT_CHIPS, INITIAL_CHAT_MESSAGES } from '../data/mockData';
 import { resolveRegionCoords, findNearestRegion } from '../data/regionCoords';
+import { LANGUAGES, resolveLanguage, detectScriptLanguage } from '../data/languages';
 import { AgentDetailModal } from './AgentDetailModal';
 import { OceanMap, ProbeResult } from './OceanMap';
+
+// Web Speech API isn't in TypeScript's default DOM lib — minimal shape for
+// what we actually use, backed by SpeechRecognition / webkitSpeechRecognition.
+interface SpeechRecognitionLike {
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  onresult: ((event: any) => void) | null;
+  onerror: ((event: any) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+}
 
 // Beyond this, the nearest coastal region isn't really "nearby" — no point
 // suggesting Odisha's coast to someone standing in Delhi.
@@ -52,8 +70,12 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
   const [activeAgentSteps, setActiveAgentSteps] = useState<AgentStatus[]>([]);
   const [inspectedFindings, setInspectedFindings] = useState<AgentFinding[] | null>(null);
   const [inspectedQuery, setInspectedQuery] = useState<string>('');
-  const [activeRoutePath, setActiveRoutePath] = useState<boolean>(false);
   const [probedLocation, setProbedLocation] = useState<ProbedLocation | null>(null);
+  const [voiceLang, setVoiceLang] = useState<LanguageCode>(user.language || 'en');
+  const [isListening, setIsListening] = useState(false);
+  const [voiceUnsupported, setVoiceUnsupported] = useState(false);
+  const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const [nearbySuggestion, setNearbySuggestion] = useState<{ name: string; distanceKm: number } | null>(null);
   const [suggestionDismissed, setSuggestionDismissed] = useState(false);
   const [locationIssue, setLocationIssue] = useState<'denied' | 'unavailable' | 'unsupported' | null>(null);
@@ -121,15 +143,58 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
     });
   };
 
+  // Voice input via the browser's native Speech Recognition — free, no
+  // backend involved. Auto-sends the transcript once recognized.
+  const startListening = () => {
+    const SpeechRecognitionCtor =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognitionCtor) {
+      setVoiceUnsupported(true);
+      return;
+    }
+    setVoiceUnsupported(false);
+    const recognition: SpeechRecognitionLike = new SpeechRecognitionCtor();
+    recognition.lang = resolveLanguage(voiceLang).speechCode;
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.onresult = (event: any) => {
+      const transcript = event.results?.[0]?.[0]?.transcript;
+      if (transcript) handleSendMessage(transcript);
+    };
+    recognition.onerror = () => setIsListening(false);
+    recognition.onend = () => setIsListening(false);
+    recognitionRef.current = recognition;
+    recognition.start();
+    setIsListening(true);
+  };
+
+  const stopListening = () => {
+    recognitionRef.current?.stop();
+    setIsListening(false);
+  };
+
+  // Voice output via the browser's native Speech Synthesis — detects the
+  // script of the *response* text so it speaks in the right voice even if
+  // it differs from whatever the voice-input picker is currently set to.
+  const speakMessage = (msg: ChatMessage) => {
+    if (!('speechSynthesis' in window)) return;
+    if (speakingMsgId === msg.id) {
+      window.speechSynthesis.cancel();
+      setSpeakingMsgId(null);
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(msg.text);
+    utterance.lang = resolveLanguage(detectScriptLanguage(msg.text)).speechCode;
+    utterance.onend = () => setSpeakingMsgId(null);
+    utterance.onerror = () => setSpeakingMsgId(null);
+    setSpeakingMsgId(msg.id);
+    window.speechSynthesis.speak(utterance);
+  };
+
   const handleSendMessage = async (textToSend?: string) => {
     const query = textToSend || inputValue.trim();
     if (!query || isProcessing) return;
-
-    const isRouteQuery =
-      query.toLowerCase().includes('route') ||
-      query.toLowerCase().includes('path') ||
-      query.toLowerCase().includes('sail') ||
-      query.toLowerCase().includes('navigate');
 
     const userMsg: ChatMessage = {
       id: `user-${Date.now()}`,
@@ -141,10 +206,6 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
     setMessages((prev) => [...prev, userMsg]);
     setInputValue('');
     setIsProcessing(true);
-
-    if (isRouteQuery) {
-      setActiveRoutePath(true);
-    }
 
     // Step 1: Temperature agent check
     const tempAgent: AgentStatus = {
@@ -221,7 +282,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
           source: data.source,
           agents: data.agents as AgentStatus[] | undefined,
           findings: data.findings as AgentFinding[] | undefined,
-          hasRoute: isRouteQuery,
+          hasRoute: !!data.routeData,
+          routeData: data.routeData,
           pfzDetails: data.pfzDetails,
         };
 
@@ -244,6 +306,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
       }, 600);
     }
   };
+
+  const latestRouteData = [...messages].reverse().find((m) => m.routeData)?.routeData;
 
   return (
     <main className="w-full px-4 -mt-36 z-10 flex-1 pb-24">
@@ -353,11 +417,11 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
             </div>
           </div>
 
-          {/* Route Warning Label overlay if active */}
-          {activeRoutePath && (
-            <div className="absolute top-2.5 left-2.5 bg-[#fde8e8] border border-[#c62828]/40 rounded-lg px-2.5 py-1 text-[9px] font-bold text-[#c62828] flex items-center gap-1 z-[1000] shadow-xs pointer-events-none">
-              <AlertTriangle className="w-3 h-3" />
-              <span>Route Hazard: 2.4m Swell at Mile 7</span>
+          {/* Route Hazard Label — reflects the most recently planned route's real waypoint data */}
+          {latestRouteData && latestRouteData.hazards.length > 0 && (
+            <div className="absolute top-2.5 left-2.5 bg-[#fde8e8] border border-[#c62828]/40 rounded-lg px-2.5 py-1 text-[9px] font-bold text-[#c62828] flex items-center gap-1 z-[1000] shadow-xs pointer-events-none max-w-[220px]">
+              <AlertTriangle className="w-3 h-3 shrink-0" />
+              <span className="truncate">{latestRouteData.hazards[0]}</span>
             </div>
           )}
 
@@ -577,7 +641,21 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
                   <div className="flex justify-start">
                     <div className="bg-[#fafaf7] text-[#22223b] rounded-2xl rounded-tl-xs px-3.5 py-2.5 max-w-[95%] border border-[#c2c6d1]/30 shadow-2xs relative">
                       <div className="absolute left-0 top-0 bottom-0 w-1 bg-[#1a5490] rounded-l-2xl" />
-                      <p className="text-xs font-sans leading-relaxed">{msg.text}</p>
+                      <div className="flex items-start gap-1.5">
+                        <p className="text-xs font-sans leading-relaxed flex-1">{msg.text}</p>
+                        {'speechSynthesis' in window && (
+                          <button
+                            type="button"
+                            onClick={() => speakMessage(msg)}
+                            title={speakingMsgId === msg.id ? 'Stop' : 'Listen to this answer'}
+                            className={`shrink-0 w-5 h-5 rounded-full flex items-center justify-center cursor-pointer transition-colors ${
+                              speakingMsgId === msg.id ? 'bg-[#1a5490] text-white' : 'text-[#1a5490] hover:bg-[#1a5490]/10'
+                            }`}
+                          >
+                            <Volume2 className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
 
                       {/* Source attribution & drill-down */}
                       <div className="mt-2 pt-1.5 border-t border-[#c2c6d1]/25 flex items-center justify-between gap-1 text-[9px] text-[#6b6b80] font-mono">
@@ -645,29 +723,62 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user }) => {
           </div>
 
           {/* User Input Prompt Bar */}
-          <div className="pt-1">
+          <div className="pt-1 flex flex-col gap-1.5">
+            {voiceUnsupported && (
+              <p className="text-[9px] text-[#b36b00] px-1">Voice input isn't supported in this browser — try Chrome on Android.</p>
+            )}
             <form
               onSubmit={(e) => {
                 e.preventDefault();
                 handleSendMessage();
               }}
-              className="relative flex items-center"
+              className="flex items-center gap-1.5"
             >
-              <input
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
+              <select
+                value={voiceLang}
+                onChange={(e) => setVoiceLang(e.target.value as LanguageCode)}
                 disabled={isProcessing}
-                className="w-full bg-[#fafaf7] border border-[#c2c6d1]/50 focus:border-[#1a5490] text-[#22223b] placeholder:text-[#6b6b80] rounded-full py-2.5 pl-4 pr-10 text-xs shadow-inner focus:outline-hidden"
-                placeholder="Ask plain-language ocean questions..."
-                type="text"
-              />
-              <button
-                type="submit"
-                disabled={!inputValue.trim() || isProcessing}
-                className="absolute right-1.5 w-7 h-7 rounded-full btn-primary-gradient disabled:opacity-40 flex items-center justify-center text-white cursor-pointer transition-transform active:scale-95 shadow-xs"
+                title="Voice input language"
+                className="shrink-0 bg-[#fafaf7] border border-[#c2c6d1]/50 text-[#22223b] rounded-full py-2.5 px-1.5 text-[10px] shadow-inner focus:outline-hidden cursor-pointer max-w-[52px]"
               >
-                <ArrowUp className="w-3.5 h-3.5" />
+                {LANGUAGES.map((l) => (
+                  <option key={l.code} value={l.code}>
+                    {l.code.toUpperCase()}
+                  </option>
+                ))}
+              </select>
+
+              <button
+                type="button"
+                onClick={isListening ? stopListening : startListening}
+                disabled={isProcessing}
+                title={isListening ? 'Stop listening' : 'Ask by voice'}
+                className={`shrink-0 w-9 h-9 rounded-full flex items-center justify-center cursor-pointer transition-all active:scale-95 shadow-xs border ${
+                  isListening
+                    ? 'bg-[#c62828] text-white border-[#c62828] animate-pulse'
+                    : 'bg-[#fafaf7] text-[#1a5490] border-[#c2c6d1]/50 hover:bg-[#e8f0fe]'
+                }`}
+              >
+                {isListening ? <Square className="w-3.5 h-3.5" /> : <Mic className="w-4 h-4" />}
               </button>
+
+              <div className="relative flex-1 flex items-center">
+                <input
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
+                  disabled={isProcessing}
+                  className="w-full bg-[#fafaf7] border border-[#c2c6d1]/50 focus:border-[#1a5490] text-[#22223b] placeholder:text-[#6b6b80] rounded-full py-2.5 pl-4 pr-10 text-xs shadow-inner focus:outline-hidden"
+                  placeholder={isListening ? 'Listening…' : 'Ask in any language, or use the mic...'}
+                  type="text"
+                />
+                <button
+                  type="submit"
+                  disabled={!inputValue.trim() || isProcessing}
+                  className="absolute right-1.5 w-7 h-7 rounded-full btn-primary-gradient disabled:opacity-40 flex items-center justify-center text-white cursor-pointer transition-transform active:scale-95 shadow-xs"
+                >
+                  <ArrowUp className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </form>
           </div>
         </div>

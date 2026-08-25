@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { UserProfile, UserRole, LanguageCode, ThemePalette } from '../types';
+import { LANGUAGES } from '../data/languages';
 import {
   Anchor,
   Microscope,
@@ -278,16 +279,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             Interface &amp; Advisory Language
           </label>
           <div className="grid grid-cols-4 gap-1 p-1 bg-[#fafaf7] rounded-xl border border-[#c2c6d1]/30 text-xs">
-            {[
-              { code: 'en', label: 'English' },
-              { code: 'hi', label: 'हिन्दी' },
-              { code: 'ta', label: 'தமிழ்' },
-              { code: 'ml', label: 'മലയാളം' },
-            ].map((lang) => (
+            {LANGUAGES.map((lang) => (
               <button
                 key={lang.code}
                 type="button"
-                onClick={() => setLanguage(lang.code as LanguageCode)}
+                onClick={() => setLanguage(lang.code)}
                 className={`py-1.5 rounded-lg font-medium transition-all cursor-pointer text-center ${
                   language === lang.code
                     ? 'btn-primary-gradient text-white font-bold shadow-2xs'
@@ -298,6 +294,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               </button>
             ))}
           </div>
+          <p className="text-[9px] text-[#6b6b80] px-0.5">
+            Chat also auto-detects whatever language you type or speak — this sets your default for voice input.
+          </p>
         </div>
 
         {/* Units Configuration */}
