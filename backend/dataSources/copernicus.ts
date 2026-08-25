@@ -136,7 +136,12 @@ async function getReading(cacheKeyPrefix: string, config: DatasetConfig, lat: nu
     cache.set(key, { reading, fetchedAt: Date.now() });
     return reading;
   } catch (err) {
-    console.warn(`Copernicus Marine fetch failed (${config.variable}):`, err instanceof Error ? err.message : err);
+    const stderr = (err as { stderr?: string })?.stderr;
+    console.warn(
+      `Copernicus Marine fetch failed (${config.variable}) at ${lat.toFixed(1)},${lon.toFixed(1)}:`,
+      err instanceof Error ? err.message : err,
+      stderr ? `\n--- stderr ---\n${stderr}` : ''
+    );
     const reading: CopernicusReading = { value: null, degraded: true };
     cache.set(key, { reading, fetchedAt: Date.now() });
     return reading;
