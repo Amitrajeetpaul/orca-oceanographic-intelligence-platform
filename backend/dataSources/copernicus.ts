@@ -82,7 +82,15 @@ async function fetchViaCli(config: DatasetConfig, lat: number, lon: number): Pro
         '--username', process.env.COPERNICUSMARINE_SERVICE_USERNAME!,
         '--password', process.env.COPERNICUSMARINE_SERVICE_PASSWORD!,
       ],
-      { timeout: 45000 }
+      {
+        timeout: 45000,
+        // Each process only subsets a handful of pixels — it doesn't need
+        // numpy/OpenBLAS's default of one thread per host CPU. Left
+        // uncapped, concurrent subprocesses (e.g. the startup cache warm-up)
+        // collectively try to spawn hundreds of threads and start failing
+        // with "pthread_create failed ... Resource temporarily unavailable".
+        env: { ...process.env, OPENBLAS_NUM_THREADS: '1', OMP_NUM_THREADS: '1', MKL_NUM_THREADS: '1' },
+      }
     );
 
     const csv = await readFile(path.join(tmpDir, outFile), 'utf-8');

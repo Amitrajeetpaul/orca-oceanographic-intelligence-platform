@@ -14,11 +14,21 @@ const COPERNICUS_REFRESH_MS = 3 * 60 * 60 * 1000; // matches copernicus.ts's cac
 // Copernicus's subprocess-backed fetch is slow (network + CLI + auth), so we
 // warm its cache for the known regions in the background instead of making a
 // chat request wait on a cold fetch. No-op if credentials aren't configured.
-function warmCopernicusCache() {
+// Runs in small batches rather than all-at-once — each subprocess spawns a
+// full Python interpreter, and firing 30+ concurrently exhausts the
+// container's process/thread limits (see OPENBLAS_NUM_THREADS note above).
+async function warmCopernicusCache() {
   if (!process.env.COPERNICUSMARINE_SERVICE_USERNAME || !process.env.COPERNICUSMARINE_SERVICE_PASSWORD) return;
-  for (const { name, coords } of getAllRegions()) {
-    getSstAt(coords.lat, coords.lon).catch((err) => console.warn(`Copernicus SST warm-up failed for ${name}:`, err));
-    getChlAt(coords.lat, coords.lon).catch((err) => console.warn(`Copernicus CHL warm-up failed for ${name}:`, err));
+  const BATCH_SIZE = 3;
+  const regions = getAllRegions();
+  for (let i = 0; i < regions.length; i += BATCH_SIZE) {
+    const batch = regions.slice(i, i + BATCH_SIZE);
+    await Promise.all(
+      batch.flatMap(({ name, coords }) => [
+        getSstAt(coords.lat, coords.lon).catch((err) => console.warn(`Copernicus SST warm-up failed for ${name}:`, err)),
+        getChlAt(coords.lat, coords.lon).catch((err) => console.warn(`Copernicus CHL warm-up failed for ${name}:`, err)),
+      ])
+    );
   }
 }
 
