@@ -116,15 +116,21 @@ async function extractRouteEndpoints(query: string): Promise<{ origin: string; d
   return { origin, destination };
 }
 
-function buildTemplateAnswer(findings: AgentFinding[], region: string): string {
+function buildTemplateAnswer(findings: AgentFinding[], region: string, unresolvedPlace: string | null): string {
   const [temp, chl, weather] = findings;
-  return [
-    temp.confidence > 0
-      ? `Sea surface temperature off ${region} is ${temp.value}.`
-      : `Sea surface temperature data is currently unavailable for ${region}.`,
-    chl.confidence > 0 ? `Chlorophyll concentration reads ${chl.value}.` : `Chlorophyll data is currently unavailable.`,
-    weather.confidence > 0 ? `Marine conditions: ${weather.value}.` : `Weather data is currently unavailable.`,
-  ].join(' ');
+  const prefix = unresolvedPlace
+    ? `I couldn't locate "${unresolvedPlace}". Showing the nearest available data for ${region} instead. `
+    : '';
+  return (
+    prefix +
+    [
+      temp.confidence > 0
+        ? `Sea surface temperature off ${region} is ${temp.value}.`
+        : `Sea surface temperature data is currently unavailable for ${region}.`,
+      chl.confidence > 0 ? `Chlorophyll concentration reads ${chl.value}.` : `Chlorophyll data is currently unavailable.`,
+      weather.confidence > 0 ? `Marine conditions: ${weather.value}.` : `Weather data is currently unavailable.`,
+    ].join(' ')
+  );
 }
 
 export async function handleChat(params: { query: string; region: string; role: string }): Promise<ChatResult> {
@@ -137,6 +143,7 @@ export async function handleChat(params: { query: string; region: string; role: 
 
   let coords = resolveRegion(params.region);
   let region = params.region;
+  let unresolvedPlace: string | null = null;
 
   if (routeResult) {
     coords = routeResult.originCoords;
@@ -148,6 +155,14 @@ export async function handleChat(params: { query: string; region: string; role: 
       if (geocoded) {
         coords = { lat: geocoded.lat, lon: geocoded.lon };
         region = geocoded.displayName;
+      } else {
+        // Groq found a place name in the question, but the geocoder
+        // couldn't locate it — don't silently answer for the unrelated
+        // dropdown default as if that's what was asked; tell the model so
+        // it can say plainly that the place wasn't found (this previously
+        // produced confusing answers like "I only have data for South
+        // Kerala Coast" when the user actually asked about somewhere else).
+        unresolvedPlace = extractedPlace;
       }
     }
   }
@@ -174,8 +189,12 @@ export async function handleChat(params: { query: string; region: string; role: 
     }`;
   }
 
+  if (unresolvedPlace) {
+    evidenceLines += `\n- Location lookup: the user asked about "${unresolvedPlace}", but this place could not be found. The numbers below are for the fallback region "${region}" instead, NOT for "${unresolvedPlace}". You MUST clearly tell the user "${unresolvedPlace}" could not be located, and that you're showing "${region}" instead as the nearest available data — do not present the fallback numbers as if they answer the original question.`;
+  }
+
   const synthesized = await synthesizeWithGroq({ query, region, role, evidenceLines });
-  const text = synthesized || buildTemplateAnswer(findings, region);
+  const text = synthesized || buildTemplateAnswer(findings, region, unresolvedPlace);
 
   return {
     text,

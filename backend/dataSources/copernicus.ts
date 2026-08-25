@@ -34,31 +34,44 @@ export interface CopernicusReading {
   degraded: boolean;
 }
 
-interface CacheEntry {
+export interface DailyValue {
+  date: string; // YYYY-MM-DD
+  value: number;
+}
+
+interface ReadingCacheEntry {
   reading: CopernicusReading;
   fetchedAt: number;
 }
 
-const cache = new Map<string, CacheEntry>();
+interface HistoryCacheEntry {
+  history: DailyValue[];
+  fetchedAt: number;
+}
+
+const readingCache = new Map<string, ReadingCacheEntry>();
+const historyCache = new Map<string, HistoryCacheEntry>();
 // Both datasets update roughly daily; a long TTL avoids hammering a slow
 // CLI subprocess on every chat message for the same region.
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
+const HISTORY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
 function hasCredentials(): boolean {
   return !!process.env.COPERNICUSMARINE_SERVICE_USERNAME && !!process.env.COPERNICUSMARINE_SERVICE_PASSWORD;
 }
 
-async function fetchViaCli(config: DatasetConfig, lat: number, lon: number): Promise<number | null> {
+// Pulls a window of daily values for a small bbox around (lat, lon), grouped
+// by date and averaged per day (a few 4km-ish pixels per day). Used both for
+// the single "latest reading" agents need and the multi-day history charts.
+async function fetchDailySeries(config: DatasetConfig, lat: number, lon: number, days: number): Promise<DailyValue[]> {
   const half = 0.1;
   const tmpDir = path.join(os.tmpdir(), `orca-cm-${Date.now()}-${Math.round(Math.random() * 1e6)}`);
   await mkdir(tmpDir, { recursive: true });
 
-  // NRT products typically lag 1-2 days behind "now" — without a date range
-  // the CLI happily returns the dataset's *entire* multi-year history
-  // (thousands of rows) for this bbox, so bound it to a short trailing
-  // window and take the most recent date within it.
+  // NRT products typically lag 1-2 days behind "now" — the extra day of
+  // padding accounts for that so the requested window isn't clipped short.
   const now = new Date();
-  const start = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000);
+  const start = new Date(now.getTime() - (days + 1) * 24 * 60 * 60 * 1000);
   const outFile = `${config.variable.toLowerCase()}.csv`;
 
   try {
@@ -95,23 +108,29 @@ async function fetchViaCli(config: DatasetConfig, lat: number, lon: number): Pro
 
     const csv = await readFile(path.join(tmpDir, outFile), 'utf-8');
     const lines = csv.trim().split('\n');
-    if (lines.length < 2) return null;
+    if (lines.length < 2) return [];
 
     const header = lines[0].split(',').map((h) => h.trim().replace(/"/g, ''));
     const timeIdx = header.indexOf('time');
     const valueIdx = header.indexOf(config.variable);
-    if (valueIdx === -1 || timeIdx === -1) return null;
+    if (valueIdx === -1 || timeIdx === -1) return [];
 
-    const rows = lines.slice(1).map((line) => line.split(','));
-    const mostRecentDate = rows.reduce((max, r) => (r[timeIdx] > max ? r[timeIdx] : max), rows[0][timeIdx]);
-    const latestValues = rows
-      .filter((r) => r[timeIdx] === mostRecentDate)
-      .map((r) => parseFloat(r[valueIdx]))
-      .filter((v) => !Number.isNaN(v));
+    const byDate = new Map<string, number[]>();
+    for (const line of lines.slice(1)) {
+      const cols = line.split(',');
+      const date = cols[timeIdx]?.slice(0, 10);
+      const value = parseFloat(cols[valueIdx]);
+      if (!date || Number.isNaN(value)) continue;
+      if (!byDate.has(date)) byDate.set(date, []);
+      byDate.get(date)!.push(value);
+    }
 
-    if (latestValues.length === 0) return null;
-    const avg = latestValues.reduce((sum, v) => sum + v, 0) / latestValues.length;
-    return config.convert ? config.convert(avg) : avg;
+    return [...byDate.entries()]
+      .map(([date, values]) => {
+        const avg = values.reduce((sum, v) => sum + v, 0) / values.length;
+        return { date, value: config.convert ? config.convert(avg) : avg };
+      })
+      .sort((a, b) => a.date.localeCompare(b.date));
   } finally {
     await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -119,7 +138,7 @@ async function fetchViaCli(config: DatasetConfig, lat: number, lon: number): Pro
 
 async function getReading(cacheKeyPrefix: string, config: DatasetConfig, lat: number, lon: number): Promise<CopernicusReading> {
   const key = `${cacheKeyPrefix}:${lat.toFixed(1)}:${lon.toFixed(1)}`;
-  const cached = cache.get(key);
+  const cached = readingCache.get(key);
   if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
     return cached.reading;
   }
@@ -131,9 +150,10 @@ async function getReading(cacheKeyPrefix: string, config: DatasetConfig, lat: nu
   }
 
   try {
-    const value = await fetchViaCli(config, lat, lon);
+    const series = await fetchDailySeries(config, lat, lon, 6);
+    const value = series.length > 0 ? series[series.length - 1].value : null;
     const reading: CopernicusReading = { value, degraded: value === null };
-    cache.set(key, { reading, fetchedAt: Date.now() });
+    readingCache.set(key, { reading, fetchedAt: Date.now() });
     return reading;
   } catch (err) {
     const stderr = (err as { stderr?: string })?.stderr;
@@ -143,8 +163,32 @@ async function getReading(cacheKeyPrefix: string, config: DatasetConfig, lat: nu
       stderr ? `\n--- stderr ---\n${stderr}` : ''
     );
     const reading: CopernicusReading = { value: null, degraded: true };
-    cache.set(key, { reading, fetchedAt: Date.now() });
+    readingCache.set(key, { reading, fetchedAt: Date.now() });
     return reading;
+  }
+}
+
+async function getHistory(cacheKeyPrefix: string, config: DatasetConfig, lat: number, lon: number, days: number): Promise<DailyValue[]> {
+  const key = `${cacheKeyPrefix}:${lat.toFixed(1)}:${lon.toFixed(1)}:${days}`;
+  const cached = historyCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < HISTORY_CACHE_TTL_MS) {
+    return cached.history;
+  }
+
+  if (!hasCredentials()) return [];
+
+  try {
+    const history = await fetchDailySeries(config, lat, lon, days);
+    historyCache.set(key, { history, fetchedAt: Date.now() });
+    return history;
+  } catch (err) {
+    const stderr = (err as { stderr?: string })?.stderr;
+    console.warn(
+      `Copernicus Marine history fetch failed (${config.variable}) at ${lat.toFixed(1)},${lon.toFixed(1)}:`,
+      err instanceof Error ? err.message : err,
+      stderr ? `\n--- stderr ---\n${stderr}` : ''
+    );
+    return [];
   }
 }
 
@@ -154,4 +198,12 @@ export function getSstAt(lat: number, lon: number): Promise<CopernicusReading> {
 
 export function getChlAt(lat: number, lon: number): Promise<CopernicusReading> {
   return getReading('chl', CHL_CONFIG, lat, lon);
+}
+
+export function getSstHistory(lat: number, lon: number, days = 30): Promise<DailyValue[]> {
+  return getHistory('sst', SST_CONFIG, lat, lon, days);
+}
+
+export function getChlHistory(lat: number, lon: number, days = 30): Promise<DailyValue[]> {
+  return getHistory('chl', CHL_CONFIG, lat, lon, days);
 }

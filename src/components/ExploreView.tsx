@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { REGIONAL_METRICS } from '../data/mockData';
 import { resolveRegionCoords } from '../data/regionCoords';
 import {
@@ -25,6 +25,43 @@ interface ProbeCoords {
   chl: string;
 }
 
+interface DailyValue {
+  date: string;
+  value: number;
+}
+
+function seriesRange(history: DailyValue[] | null): [number, number] {
+  if (!history || history.length === 0) return [0, 1];
+  const values = history.map((d) => d.value);
+  return [Math.min(...values), Math.max(...values)];
+}
+
+function barHeightPct(value: number, min: number, max: number): number {
+  if (max === min) return 60;
+  return Math.max(15, Math.min(95, ((value - min) / (max - min)) * 80 + 15));
+}
+
+function formatShortDate(dateStr: string): string {
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString('en-IN', { month: 'short', day: 'numeric' });
+}
+
+// Real daily points connected with straight segments (no invented curve
+// smoothing) — normalized into the SVG's 0-100 x / 0-50 y viewBox.
+function buildLinePoints(history: DailyValue[], min: number, max: number): string {
+  if (history.length === 0) return '';
+  const stepX = history.length > 1 ? 100 / (history.length - 1) : 0;
+  return history
+    .map((d, i) => {
+      const x = i * stepX;
+      const norm = max === min ? 0.5 : (d.value - min) / (max - min);
+      const y = 45 - norm * 40; // 5px padding top/bottom within the 0-50 viewBox
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    })
+    .join(' L');
+}
+
 export const ExploreView: React.FC<ExploreViewProps> = ({
   selectedRegion,
   onRegionChange,
@@ -37,11 +74,41 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
   // Research comparison state
   const [regionA, setRegionA] = useState<string>('Vizhinjam');
   const [regionB, setRegionB] = useState<string>('Kochi');
-  const [hoveredBarIndex, setHoveredBarIndex] = useState<number | null>(7);
+  const [hoveredBarIndex, setHoveredBarIndex] = useState<number | null>(null);
+  const [sstHistory, setSstHistory] = useState<DailyValue[] | null>(null);
+  const [chlHistory, setChlHistory] = useState<DailyValue[] | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   const metricA = REGIONAL_METRICS[regionA] || REGIONAL_METRICS.Vizhinjam;
   const metricB = REGIONAL_METRICS[regionB] || REGIONAL_METRICS.Kochi;
   const regionCoords = resolveRegionCoords(selectedRegion);
+
+  // Real 30-day SST/chlorophyll history, pulled from Copernicus's own
+  // archive — fetched lazily once the Research tab is actually opened.
+  useEffect(() => {
+    if (subTab !== 'research') return;
+    let cancelled = false;
+    setHistoryLoading(true);
+    fetch(`/api/history?region=${encodeURIComponent(selectedRegion)}&days=30`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (cancelled) return;
+        setSstHistory(data.sst || []);
+        setChlHistory(data.chl || []);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSstHistory([]);
+          setChlHistory([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setHistoryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [subTab, selectedRegion]);
 
   const handleProbe = (lat: number, lon: number, result: ProbeResult | null) => {
     if (!result) {
@@ -55,6 +122,14 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
       chl: result.chl.value !== null ? `${result.chl.value.toFixed(2)} mg/m³` : 'Unavailable',
     });
   };
+
+  const [sstMin, sstMax] = seriesRange(sstHistory);
+  const [chlMin, chlMax] = seriesRange(chlHistory);
+  const sstWeeklyDelta =
+    sstHistory && sstHistory.length >= 8
+      ? sstHistory[sstHistory.length - 1].value - sstHistory[sstHistory.length - 8].value
+      : null;
+  const chlLinePoints = chlHistory ? buildLinePoints(chlHistory, chlMin, chlMax) : '';
 
   return (
     <main className="w-full px-4 -mt-36 z-10 flex-1 flex flex-col gap-3.5 pb-24">
@@ -269,14 +344,24 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                 Weekly Insight
               </h3>
               <p className="text-xs text-[#374151] leading-relaxed mt-1">
-                Average SST has increased by{' '}
-                <span className="font-extrabold text-[#dc2626]">0.8°C</span> over the last week in
-                the {metricA.regionName} region.
+                {historyLoading ? (
+                  'Fetching live satellite history…'
+                ) : sstWeeklyDelta === null ? (
+                  'Not enough historical readings yet to compute a weekly trend for this region.'
+                ) : (
+                  <>
+                    Average SST has {sstWeeklyDelta >= 0 ? 'increased' : 'decreased'} by{' '}
+                    <span className="font-extrabold text-[#dc2626]">
+                      {Math.abs(sstWeeklyDelta).toFixed(1)}°C
+                    </span>{' '}
+                    over the last week near {selectedRegion}.
+                  </>
+                )}
               </p>
             </div>
           </div>
 
-          {/* SST Trend (30 Days) Card with Gradient Bars & Highlights */}
+          {/* SST Trend (30 Days) Card — real daily readings from Copernicus Marine */}
           <div className="bg-[#ffffff] rounded-2xl p-4 floating-card-shadow border border-[#c2c6d1]/35 flex flex-col justify-between">
             <div className="flex justify-between items-center mb-1">
               <div className="flex items-center gap-1.5">
@@ -293,64 +378,56 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
               </button>
             </div>
 
-            <div className="h-28 w-full relative flex items-end justify-between gap-1.5 mt-4 px-1">
-              {/* Dashed Red Trendline */}
-              <svg
-                className="absolute inset-0 w-full h-full pointer-events-none"
-                preserveAspectRatio="none"
-                viewBox="0 0 100 100"
-              >
-                <path
-                  d="M5,70 L15,65 L25,60 L35,58 L45,62 L55,52 L65,48 L75,40 L85,45 L95,30"
-                  fill="none"
-                  stroke="#c62828"
-                  strokeDasharray="2 2"
-                  strokeWidth="1.5"
-                  vectorEffect="non-scaling-stroke"
-                />
-              </svg>
+            {!sstHistory || sstHistory.length === 0 ? (
+              <div className="h-28 w-full flex items-center justify-center text-[10px] text-[#9ca3af] font-mono">
+                {historyLoading ? 'Loading real satellite data…' : 'No live SST history available for this region.'}
+              </div>
+            ) : (
+              <>
+                <div className="h-28 w-full relative flex items-end justify-between gap-1 mt-4 px-1">
+                  {sstHistory.map((day, index) => {
+                    const isSelected = hoveredBarIndex === index;
+                    const heightPct = barHeightPct(day.value, sstMin, sstMax);
 
-              {/* 10 Gradient Bar Columns */}
-              {metricA.sstData.map((bar, index) => {
-                const isSelected = hoveredBarIndex === index || bar.highlight;
-                const barHeightPct = Math.max(30, Math.min(95, ((bar.temp - 26) / 4.5) * 100));
-
-                return (
-                  <div
-                    key={index}
-                    onMouseEnter={() => setHoveredBarIndex(index)}
-                    className="w-full h-full flex flex-col justify-end items-center relative group cursor-pointer"
-                  >
-                    {isSelected && (
-                      <div className="absolute -top-6 bg-[#ffffff] shadow-xs border border-[#c2c6d1]/40 rounded px-1.5 py-0.5 text-[8px] font-bold text-[#1a5490] font-mono whitespace-nowrap z-20">
-                        {bar.temp}°C
+                    return (
+                      <div
+                        key={day.date}
+                        onMouseEnter={() => setHoveredBarIndex(index)}
+                        onMouseLeave={() => setHoveredBarIndex(null)}
+                        className="w-full h-full flex flex-col justify-end items-center relative group cursor-pointer"
+                      >
+                        {isSelected && (
+                          <div className="absolute -top-6 bg-[#ffffff] shadow-xs border border-[#c2c6d1]/40 rounded px-1.5 py-0.5 text-[8px] font-bold text-[#1a5490] font-mono whitespace-nowrap z-20">
+                            {day.value.toFixed(1)}°C · {formatShortDate(day.date)}
+                          </div>
+                        )}
+                        <div
+                          style={{ height: `${heightPct}%` }}
+                          className={`w-full rounded-t-xs transition-all ${
+                            isSelected ? 'bar-highlight-gradient' : 'bar-inactive-gradient'
+                          }`}
+                        />
                       </div>
-                    )}
-                    <div
-                      style={{ height: `${barHeightPct}%` }}
-                      className={`w-full rounded-t-xs transition-all ${
-                        isSelected ? 'bar-highlight-gradient' : 'bar-inactive-gradient'
-                      }`}
-                    />
-                  </div>
-                );
-              })}
-            </div>
+                    );
+                  })}
+                </div>
 
-            <div className="flex justify-between mt-2 text-[8px] text-[#6b6b80] font-mono">
-              <span>Oct 1</span>
-              <span>Oct 15</span>
-              <span>Oct 30</span>
-            </div>
+                <div className="flex justify-between mt-2 text-[8px] text-[#6b6b80] font-mono">
+                  <span>{formatShortDate(sstHistory[0].date)}</span>
+                  <span>{formatShortDate(sstHistory[Math.floor(sstHistory.length / 2)].date)}</span>
+                  <span>{formatShortDate(sstHistory[sstHistory.length - 1].date)}</span>
+                </div>
+              </>
+            )}
           </div>
 
-          {/* Chlorophyll Concentration Diurnal Curve */}
+          {/* Chlorophyll Concentration Card — real daily readings, gap-free ocean colour product */}
           <div className="bg-[#ffffff] rounded-2xl p-4 floating-card-shadow border border-[#c2c6d1]/35 flex flex-col justify-between">
             <div className="flex justify-between items-center mb-1">
               <div className="flex items-center gap-1.5">
                 <Leaf className="w-4 h-4 text-[#2e7d32]" />
                 <h3 className="font-heading text-xs font-bold text-[#22223b]">
-                  Chlorophyll Concentration (Diurnal)
+                  Chlorophyll Concentration <span className="font-normal text-[#6b7280]">(30 Days)</span>
                 </h3>
               </div>
               <span className="text-[8px] font-bold text-[#2e7d32] font-mono bg-[#e8f5e9] px-2 py-0.5 rounded-full">
@@ -358,34 +435,38 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
               </span>
             </div>
 
-            <div className="h-24 w-full relative mt-2">
-              <svg className="w-full h-full overflow-visible" preserveAspectRatio="none" viewBox="0 0 100 50">
-                <defs>
-                  <linearGradient id="chloroGrad" x1="0%" x2="0%" y1="0%" y2="100%">
-                    <stop offset="0%" stopColor="#2e7d32" stopOpacity="0.4" />
-                    <stop offset="100%" stopColor="#e8f5e9" stopOpacity="0.0" />
-                  </linearGradient>
-                </defs>
-                <path
-                  d="M0,40 Q15,35 25,30 T45,20 T65,28 T85,10 T100,15 L100,50 L0,50 Z"
-                  fill="url(#chloroGrad)"
-                />
-                <path
-                  d="M0,40 Q15,35 25,30 T45,20 T65,28 T85,10 T100,15"
-                  fill="none"
-                  stroke="#2e7d32"
-                  strokeWidth="2"
-                  vectorEffect="non-scaling-stroke"
-                />
-              </svg>
-            </div>
+            {!chlHistory || chlHistory.length === 0 ? (
+              <div className="h-24 w-full flex items-center justify-center text-[10px] text-[#9ca3af] font-mono">
+                {historyLoading ? 'Loading real satellite data…' : 'No live chlorophyll history available for this region.'}
+              </div>
+            ) : (
+              <>
+                <div className="h-24 w-full relative mt-2">
+                  <svg className="w-full h-full overflow-visible" preserveAspectRatio="none" viewBox="0 0 100 50">
+                    <defs>
+                      <linearGradient id="chloroGrad" x1="0%" x2="0%" y1="0%" y2="100%">
+                        <stop offset="0%" stopColor="#2e7d32" stopOpacity="0.4" />
+                        <stop offset="100%" stopColor="#e8f5e9" stopOpacity="0.0" />
+                      </linearGradient>
+                    </defs>
+                    <path d={`M${chlLinePoints} L100,50 L0,50 Z`} fill="url(#chloroGrad)" />
+                    <path
+                      d={`M${chlLinePoints}`}
+                      fill="none"
+                      stroke="#2e7d32"
+                      strokeWidth="2"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  </svg>
+                </div>
 
-            <div className="flex justify-between mt-2 text-[8px] text-[#6b6b80] font-mono">
-              <span>00:00</span>
-              <span>06:00</span>
-              <span>12:00</span>
-              <span>18:00</span>
-            </div>
+                <div className="flex justify-between mt-2 text-[8px] text-[#6b6b80] font-mono">
+                  <span>{formatShortDate(chlHistory[0].date)}</span>
+                  <span>{formatShortDate(chlHistory[Math.floor(chlHistory.length / 2)].date)}</span>
+                  <span>{formatShortDate(chlHistory[chlHistory.length - 1].date)}</span>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

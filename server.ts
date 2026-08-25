@@ -4,8 +4,8 @@ import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import { handleChat } from './backend/orchestrator';
 import { probePoint } from './backend/probe';
-import { getSstAt, getChlAt } from './backend/dataSources/copernicus';
-import { getAllRegions } from './backend/regions';
+import { getSstAt, getChlAt, getSstHistory, getChlHistory } from './backend/dataSources/copernicus';
+import { getAllRegions, resolveRegion } from './backend/regions';
 
 dotenv.config();
 
@@ -83,6 +83,26 @@ async function startServer() {
       return res.json(result);
     } catch (error: any) {
       console.error('Probe error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Real 30-day SST/chlorophyll history for Explore's charts — pulled
+  // directly from Copernicus's own archive in one call each (not an
+  // accumulating local store), so it's a genuine retrospective from day one.
+  app.get('/api/history', async (req, res) => {
+    const region = (req.query.region as string) || 'South Kerala Coast';
+    const days = req.query.days ? parseInt(req.query.days as string, 10) : 30;
+    const coords = resolveRegion(region);
+
+    try {
+      const [sst, chl] = await Promise.all([
+        getSstHistory(coords.lat, coords.lon, days),
+        getChlHistory(coords.lat, coords.lon, days),
+      ]);
+      return res.json({ region, coords, sst, chl });
+    } catch (error: any) {
+      console.error('History error:', error);
       res.status(500).json({ error: error.message });
     }
   });
