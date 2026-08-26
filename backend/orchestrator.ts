@@ -234,7 +234,10 @@ async function handleMultiRegionQuery(params: {
     const toAvoid = scan.filter((r) => r.hazardous || r.nearForeignWaters);
     evidenceLines =
       toAvoid.length > 0
-        ? toAvoid
+        ? `${toAvoid.length} of ${scan.length} monitored regions are currently flagged — the other ${
+            scan.length - toAvoid.length
+          } are within normal safe conditions and NOT listed below:\n` +
+          toAvoid
             .map((r) => {
               const reasons = [
                 r.hazardous ? `hazardous conditions (${r.hazardReason})` : null,
@@ -243,7 +246,7 @@ async function handleMultiRegionQuery(params: {
               return `- ${r.region}: ${reasons.join('; ')}`;
             })
             .join('\n')
-        : 'No monitored region currently shows hazardous conditions or maritime boundary concerns.';
+        : `All ${scan.length} monitored regions are currently within normal safe conditions — none need to be avoided right now.`;
     summaryValue = `${toAvoid.length} region${toAvoid.length === 1 ? '' : 's'} flagged`;
   }
 
@@ -260,7 +263,7 @@ async function handleMultiRegionQuery(params: {
     status: 'completed',
   };
 
-  const evidenceBlock = `- Regional Survey Agent [live scan across ${scan.length} monitored regions]:\n${evidenceLines}`;
+  const evidenceBlock = `- Regional Survey Agent [live scan across ${scan.length} monitored regions — read the numbers below carefully, do not assume every scanned region matches the description]:\n${evidenceLines}`;
   const synthesized = await synthesizeWithGroq({
     query,
     region: 'all monitored regions',
