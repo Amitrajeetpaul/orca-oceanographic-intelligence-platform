@@ -3,7 +3,7 @@ import { LANGUAGES } from '../src/data/languages';
 import { resolveRegion } from './regions';
 import { geocodePlace, reverseGeocode } from './dataSources/geocoding';
 import { checkGeofence } from './dataSources/eez';
-import { findNearbyCyclone } from './dataSources/gdacs';
+import { findNearbyCyclone, NearbyCyclone } from './dataSources/gdacs';
 import { planRoute, planRouteToNearestPfz } from './route';
 import { runTemperatureAgent } from './agents/temperatureAgent';
 import { runChlorophyllAgent } from './agents/chlorophyllAgent';
@@ -88,11 +88,14 @@ async function callGroq(
     ...(opts.maxTokens ? { max_tokens: opts.maxTokens, reasoning_effort: 'low' } : {}),
   });
 
-  // One retry on rate-limit (429) — a short burst of messages can briefly
-  // exceed Groq's per-minute token budget even with capped output; without
-  // this, every extraction/synthesis call in that window would silently
-  // fail and fall back to a generic answer instead of the real one.
-  for (let attempt = 0; attempt <= 1; attempt++) {
+  // Up to 2 retries on rate-limit (429) — a burst of messages (several
+  // questions asked quickly, e.g. during a demo) can exceed Groq's
+  // per-minute token budget even with capped output. One retry wasn't
+  // enough to survive a sustained burst in testing; without enough
+  // retries, every extraction/synthesis call in that window silently
+  // fails and falls back to a generic answer instead of the real one.
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
       const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
@@ -104,8 +107,8 @@ async function callGroq(
         signal: AbortSignal.timeout(opts.maxTokens ? 8000 : 10000),
       });
 
-      if (res.status === 429 && attempt === 0) {
-        const retryAfterMs = Math.min(parseFloat(res.headers.get('retry-after') || '1') * 1000, 3000);
+      if (res.status === 429 && attempt < MAX_ATTEMPTS - 1) {
+        const retryAfterMs = Math.min(parseFloat(res.headers.get('retry-after') || '1') * 1000 * (attempt + 1), 4000);
         await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
         continue;
       }
@@ -156,18 +159,47 @@ ${params.evidenceLines}`;
   return callGroq(systemPrompt, params.query, { temperature: 0.4, history: params.history, maxTokens: 500 });
 }
 
-// Lets a user ask about any place ("Marina Beach", "Kovalam") in free text,
-// in any language, instead of being limited to the fixed region dropdown.
-// Given conversation history, also resolves follow-ups that don't name a
-// place at all ("what about tomorrow?", "is it safe there?") by inferring
-// the place is still whatever was last discussed. Returns null only if no
-// place has ever come up (or Groq is unavailable).
-async function extractPlaceName(query: string, history: ConversationTurn[] = []): Promise<string | null> {
-  const systemPrompt = `Extract the core place, city, or beach name being discussed in the user's LATEST question about Indian coastal waters — the question may be in English or any Indian regional language. Strip generic descriptor words like "coast", "sea", "waters", "area" unless they're part of the official name (e.g. keep "Marina Beach" as-is, but for "Chennai coast" extract just "Chennai"). If the user refers to their own current position (e.g. "near me", "my location", "where I am", "my current position"), reply with exactly: MY_LOCATION. If the latest question doesn't name a place but is a natural follow-up to the conversation (e.g. "what about tomorrow?", "is it safe there?", "and the wind?"), infer the place from the conversation history instead. Reply with ONLY the place name (transliterated to English/Latin script) and nothing else. If no place has been mentioned anywhere in the conversation, reply with exactly: NONE`;
+export type TemporalIntent = { daysAhead: number; dateLabel: string } | 'too_far' | null;
 
-  const result = await callGroq(systemPrompt, query, { maxTokens: 200, history });
-  if (!result || result.toUpperCase() === 'NONE') return null;
-  return result;
+// Combines place extraction and temporal-intent detection into one Groq
+// call (was two) — same reasoning as the survey+trend merge above: fewer,
+// denser calls per message means less total token pressure and fewer
+// opportunities to hit Groq's per-minute rate limit under a burst.
+async function extractPlaceAndTemporal(query: string, history: ConversationTurn[] = []): Promise<{ place: string | null; temporal: TemporalIntent }> {
+  const today = new Date();
+  const todayStr = today.toISOString().slice(0, 10);
+  const todayDow = today.toLocaleDateString('en-US', { weekday: 'long' });
+
+  const systemPrompt = `Today is ${todayDow}, ${todayStr}. Analyze the user's LATEST question about Indian coastal waters — English or any Indian regional language, possibly with voice-transcription noise. Reply with EXACTLY two fields separated by "###", nothing else: PLACE###TEMPORAL
+
+PLACE: extract the core place, city, or beach name being discussed. Strip generic descriptor words like "coast", "sea", "waters", "area" unless they're part of the official name (e.g. keep "Marina Beach" as-is, but for "Chennai coast" extract just "Chennai"). If the user refers to their own current position ("near me", "my location", "where I am"), reply MY_LOCATION. If the latest question doesn't name a place but is a natural follow-up to the conversation (e.g. "what about tomorrow?", "is it safe there?"), infer the place from conversation history instead. Reply NONE if no place has been mentioned anywhere in the conversation.
+
+TEMPORAL: determine if the question (using history to resolve follow-ups like "what about tomorrow?") is asking about a FUTURE day rather than right now/today. Reply NOW if about now/today or no clear future reference. Reply N|label if it names a future day within 7 days (N = integer 1-7, label = short text like "tomorrow" or "Friday" — use a pipe between N and label here). Reply TOO_FAR if asking about something more than 7 days away.
+
+Example replies: "Kochi###NOW" or "MY_LOCATION###1|tomorrow" or "NONE###TOO_FAR"`;
+
+  const result = await callGroq(systemPrompt, query, { maxTokens: 250, history });
+  if (!result) return { place: null, temporal: null };
+
+  const [placeRaw, temporalRaw] = result.trim().split('###').map((s) => s.trim());
+
+  const place = !placeRaw || placeRaw.toUpperCase() === 'NONE' ? null : placeRaw;
+
+  let temporal: TemporalIntent = null;
+  if (temporalRaw) {
+    const t = temporalRaw.toUpperCase();
+    if (t === 'TOO_FAR') {
+      temporal = 'too_far';
+    } else if (t !== 'NOW') {
+      const [nStr, label] = temporalRaw.split('|').map((s) => s.trim());
+      const n = parseInt(nStr, 10);
+      if (!Number.isNaN(n) && n >= 1 && n <= 7) {
+        temporal = { daysAhead: n, dateLabel: label || `${n} day(s) from now` };
+      }
+    }
+  }
+
+  return { place, temporal };
 }
 
 // Detects route-planning questions ("safest route from X to Y", "plan a path
@@ -188,33 +220,34 @@ async function extractRouteEndpoints(
 // Detects broad, coast-wide survey questions ("which regions look good for
 // fishing?", "which zones should I avoid?") as distinct from a question
 // about one specific named place — these need a scan across every known
-// region instead of the single-location agent pipeline.
-async function extractMultiRegionIntent(query: string, history: ConversationTurn[] = []): Promise<'favorable' | 'avoid' | null> {
-  const systemPrompt = `The user is asking about Indian coastal waters, possibly in a regional Indian language. Determine if their LATEST message is asking to SURVEY OR COMPARE conditions across MULTIPLE regions/zones spanning the coast — NOT about one specific named place. Two kinds: (1) asking which regions currently look FAVORABLE for fishing (high chlorophyll, good sea temperature, productive conditions) — reply exactly: FAVORABLE. (2) asking which regions/zones should be AVOIDED right now due to hazardous conditions or maritime boundary restrictions — reply exactly: AVOID. If the question names one specific place, or isn't this kind of broad multi-region survey, reply exactly: NONE`;
+// region instead of the single-location agent pipeline. Merged with trend
+// detection into one Groq call (was two) — a single chat message could
+// otherwise trigger up to 6 separate Groq calls, which was the real cause
+// of repeated 429 rate-limit cascades under a burst of messages (confirmed
+// via Railway logs). Fewer, denser calls means less total token pressure.
+async function extractSurveyAndTrendIntent(
+  query: string,
+  history: ConversationTurn[] = []
+): Promise<{ survey: 'favorable' | 'avoid' | null; wantsTrend: boolean }> {
+  const systemPrompt = `The user is asking about Indian coastal waters, possibly in a regional Indian language. Analyze their LATEST message and reply with EXACTLY two fields separated by "|", nothing else: SURVEY|TREND
 
-  // Bumped from 50 to 100 as a precaution — the same class of bug as
-  // extractTrendAnalysisIntent (too little headroom for this reasoning
-  // model's hidden "thinking" tokens can silently return empty content)
-  // wasn't observed here in testing, but the margin was thin.
-  const result = await callGroq(systemPrompt, query, { maxTokens: 100, history });
-  if (!result) return null;
-  const trimmed = result.trim().toUpperCase();
-  if (trimmed === 'FAVORABLE') return 'favorable';
-  if (trimmed === 'AVOID') return 'avoid';
-  return null;
-}
+SURVEY: determine if the message is asking to SURVEY OR COMPARE conditions across MULTIPLE regions/zones spanning the coast — NOT about one specific named place. Reply FAVORABLE if asking which regions currently look favorable for fishing (high chlorophyll, good sea temperature). Reply AVOID if asking which regions/zones should be avoided right now due to hazardous conditions or maritime boundary restrictions. Otherwise reply NONE.
 
-// Detects "why has X changed/declined?" style questions — these need a
-// real 30-day trend, not just today's snapshot, to reason about honestly.
-async function extractTrendAnalysisIntent(query: string, history: ConversationTurn[] = []): Promise<boolean> {
-  const systemPrompt = `The user is asking about Indian coastal waters, possibly in a regional Indian language. Determine if their LATEST message is asking WHY something has CHANGED, DECLINED, IMPROVED, or is DIFFERENT compared to before (e.g. "why has fish productivity declined here?", "has chlorophyll dropped recently?", "why are catches worse than last month?") — a question that needs a TREND over time, not just today's snapshot. Reply with exactly: YES if so. Otherwise reply with exactly: NO`;
+TREND: reply YES if the message is asking WHY something has CHANGED, DECLINED, IMPROVED, or is DIFFERENT compared to before (e.g. "why has fish productivity declined here?", "has chlorophyll dropped recently?") — a question that needs a trend over time, not just today's snapshot. Otherwise reply NO.
+
+Example replies: "NONE|NO" or "FAVORABLE|NO" or "NONE|YES"`;
 
   // maxTokens must leave enough room for this reasoning model's hidden
-  // "thinking" tokens before the actual YES/NO — 20 was too tight and the
-  // model spent the whole budget reasoning, returning empty content every
-  // time (confirmed directly: reasoning correctly said "yes", content was "").
-  const result = await callGroq(systemPrompt, query, { maxTokens: 100, history });
-  return result?.trim().toUpperCase() === 'YES';
+  // "thinking" tokens before the actual answer — too little headroom (20
+  // was tried) silently returns empty content (confirmed directly:
+  // reasoning correctly answered internally, content field was "").
+  const result = await callGroq(systemPrompt, query, { maxTokens: 150, history });
+  if (!result) return { survey: null, wantsTrend: false };
+
+  const [surveyRaw, trendRaw] = result.trim().toUpperCase().split('|').map((s) => s.trim());
+  const survey = surveyRaw === 'FAVORABLE' ? 'favorable' : surveyRaw === 'AVOID' ? 'avoid' : null;
+  const wantsTrend = trendRaw === 'YES';
+  return { survey, wantsTrend };
 }
 
 const POTENTIAL_RANK: Record<'High' | 'Moderate' | 'Low', number> = { High: 2, Moderate: 1, Low: 0 };
@@ -312,32 +345,13 @@ async function handleMultiRegionQuery(params: {
   };
 }
 
-export type TemporalIntent = { daysAhead: number; dateLabel: string } | 'too_far' | null;
-
-// Detects genuinely future-dated questions ("what about tomorrow?", "safe
-// to go out Friday?") so the orchestrator can fetch a real forecast instead
-// of quietly answering with today's live reading as if it addressed the
-// question. Returns null for "now"/no clear future reference.
-async function extractTemporalIntent(query: string, history: ConversationTurn[] = []): Promise<TemporalIntent> {
-  const today = new Date();
-  const todayStr = today.toISOString().slice(0, 10);
-  const todayDow = today.toLocaleDateString('en-US', { weekday: 'long' });
-
-  const systemPrompt = `Today is ${todayDow}, ${todayStr}. The user is asking about Indian coastal waters, possibly in a regional Indian language, possibly with voice-transcription noise. Determine if their LATEST message (using conversation history to resolve follow-ups like "what about tomorrow?") is asking about conditions on a FUTURE day, rather than right now/today/current conditions. If it's about now/today or has no clear future reference, reply with exactly: NOW. If it names a future day within the next 7 days (tomorrow, a weekday name, "in 3 days", "this weekend"), reply with ONLY: N|label — where N is an integer 1-7 (days from today) and label is a short human-readable label such as "tomorrow" or "Friday". If it asks about something more than 7 days away, reply with exactly: TOO_FAR`;
-
-  const result = await callGroq(systemPrompt, query, { maxTokens: 100, history });
-  if (!result) return null;
-  const trimmed = result.trim().toUpperCase();
-  if (trimmed === 'NOW') return null;
-  if (trimmed === 'TOO_FAR') return 'too_far';
-
-  const [nStr, label] = result.trim().split('|').map((s) => s.trim());
-  const n = parseInt(nStr, 10);
-  if (Number.isNaN(n) || n < 1 || n > 7) return null;
-  return { daysAhead: n, dateLabel: label || `${n} day(s) from now` };
-}
-
-function buildTemplateAnswer(findings: AgentFinding[], region: string, unresolvedPlace: string | null, locationUnavailable = false): string {
+function buildTemplateAnswer(
+  findings: AgentFinding[],
+  region: string,
+  unresolvedPlace: string | null,
+  locationUnavailable = false,
+  nearbyCyclone: NearbyCyclone | null = null
+): string {
   const [temp, chl, weather, tide] = findings;
   const prefix = unresolvedPlace
     ? `I couldn't locate "${unresolvedPlace}". Showing the nearest available data for ${region} instead. `
@@ -353,6 +367,13 @@ function buildTemplateAnswer(findings: AgentFinding[], region: string, unresolve
       chl.confidence > 0 ? `Chlorophyll concentration reads ${chl.value}.` : `Chlorophyll data is currently unavailable.`,
       weather.confidence > 0 ? `Marine conditions: ${weather.value}.` : `Weather data is currently unavailable.`,
       tide && tide.confidence > 0 ? `Tide: ${tide.value}.` : '',
+      // This was previously silently missing from the fallback path — a
+      // Groq hiccup on a "any cyclone/lightning alerts?" question meant
+      // the answer never mentioned cyclones at all, even though the data
+      // was already fetched (confirmed via live testing).
+      nearbyCyclone
+        ? `Cyclone Alert: Tropical Cyclone ${nearbyCyclone.cyclone.name} is active roughly ${Math.round(nearbyCyclone.distanceKm)}km away (${nearbyCyclone.cyclone.severityText}).`
+        : 'No active tropical cyclone within 500km.',
     ]
       .filter(Boolean)
       .join(' ')
@@ -372,11 +393,8 @@ export async function handleChat(params: {
   // Run in parallel with route extraction — a coast-wide survey question
   // ("which regions look good?") takes a completely different path from
   // the rest of this function, so branch out immediately if detected.
-  const [routeEndpoints, multiRegionMode, wantsTrendAnalysis] = await Promise.all([
-    extractRouteEndpoints(query, history),
-    extractMultiRegionIntent(query, history),
-    extractTrendAnalysisIntent(query, history),
-  ]);
+  const [routeEndpoints, surveyAndTrend] = await Promise.all([extractRouteEndpoints(query, history), extractSurveyAndTrendIntent(query, history)]);
+  const { survey: multiRegionMode, wantsTrend: wantsTrendAnalysis } = surveyAndTrend;
 
   if (multiRegionMode) {
     return handleMultiRegionQuery({ mode: multiRegionMode, query, role, preferredLanguage, history });
@@ -416,12 +434,7 @@ export async function handleChat(params: {
     coords = routeResult.originCoords;
     region = routeResult.origin;
   } else {
-    // Independent Groq calls — run in parallel rather than adding another
-    // sequential round-trip to every request.
-    const [extractedPlace, intent] = await Promise.all([
-      extractPlaceName(query, history),
-      extractTemporalIntent(query, history),
-    ]);
+    const { place: extractedPlace, temporal: intent } = await extractPlaceAndTemporal(query, history);
     temporalIntent = intent;
 
     if (extractedPlace?.toUpperCase() === 'MY_LOCATION') {
@@ -538,7 +551,7 @@ export async function handleChat(params: {
   }
 
   const synthesized = await synthesizeWithGroq({ query, region, role, evidenceLines, preferredLanguage, history });
-  const text = synthesized || buildTemplateAnswer(findings, region, unresolvedPlace, locationUnavailable);
+  const text = synthesized || buildTemplateAnswer(findings, region, unresolvedPlace, locationUnavailable, nearbyCyclone);
 
   return {
     text,
