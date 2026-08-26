@@ -165,7 +165,10 @@ export type TemporalIntent = { daysAhead: number; dateLabel: string } | 'too_far
 // call (was two) — same reasoning as the survey+trend merge above: fewer,
 // denser calls per message means less total token pressure and fewer
 // opportunities to hit Groq's per-minute rate limit under a burst.
-async function extractPlaceAndTemporal(query: string, history: ConversationTurn[] = []): Promise<{ place: string | null; temporal: TemporalIntent }> {
+async function extractPlaceAndTemporal(
+  query: string,
+  history: ConversationTurn[] = []
+): Promise<{ place: string | null; temporal: TemporalIntent; extractionFailed: boolean }> {
   const today = new Date();
   const todayStr = today.toISOString().slice(0, 10);
   const todayDow = today.toLocaleDateString('en-US', { weekday: 'long' });
@@ -179,7 +182,14 @@ TEMPORAL: determine if the question (using history to resolve follow-ups like "w
 Example replies: "Kochi###NOW" or "MY_LOCATION###1|tomorrow" or "NONE###TOO_FAR"`;
 
   const result = await callGroq(systemPrompt, query, { maxTokens: 250, history });
-  if (!result) return { place: null, temporal: null };
+  // Distinguish "Groq call itself failed" (timeout, rate limit, error) from
+  // "Groq succeeded and genuinely found no place" — these were previously
+  // conflated into the same null result, which meant a failed AI service
+  // call silently looked identical to "no place was mentioned" and fell
+  // through to the unrelated dropdown default with zero indication
+  // anything had gone wrong (confirmed by real user confusion: "whatever
+  // I ask, it just answers for Kerala").
+  if (!result) return { place: null, temporal: null, extractionFailed: true };
 
   const [placeRaw, temporalRaw] = result.trim().split('###').map((s) => s.trim());
 
@@ -199,7 +209,7 @@ Example replies: "Kochi###NOW" or "MY_LOCATION###1|tomorrow" or "NONE###TOO_FAR"
     }
   }
 
-  return { place, temporal };
+  return { place, temporal, extractionFailed: false };
 }
 
 // Detects route-planning questions ("safest route from X to Y", "plan a path
@@ -350,10 +360,20 @@ function buildTemplateAnswer(
   region: string,
   unresolvedPlace: string | null,
   locationUnavailable = false,
-  nearbyCyclone: NearbyCyclone | null = null
+  nearbyCyclone: NearbyCyclone | null = null,
+  extractionFailed = false
 ): string {
   const [temp, chl, weather, tide] = findings;
-  const prefix = unresolvedPlace
+  // extractionFailed takes priority — it means the AI service itself
+  // couldn't even process what place was being asked about (distinct from
+  // "found a place name but couldn't locate it"), so the disclaimer must
+  // say that plainly rather than silently showing unrelated regional data
+  // as if it answers the question (this was the actual bug behind "no
+  // matter what I ask, it just answers for Kerala" — a failed extraction
+  // call and "no place was mentioned" were being treated identically).
+  const prefix = extractionFailed
+    ? `I'm having trouble understanding your request right now (temporary AI service issue) — showing live data for ${region} instead, which may not be what you asked about. Please try again in a moment. `
+    : unresolvedPlace
     ? `I couldn't locate "${unresolvedPlace}". Showing the nearest available data for ${region} instead. `
     : locationUnavailable
     ? `Your location wasn't available. Showing the nearest available data for ${region} instead. `
@@ -402,6 +422,7 @@ export async function handleChat(params: {
 
   let coords = resolveRegion(params.region);
   let region = params.region;
+  let extractionFailed = false;
   let unresolvedPlace: string | null = null;
   let temporalIntent: TemporalIntent = null;
   let locationUnavailable = false;
@@ -434,8 +455,9 @@ export async function handleChat(params: {
     coords = routeResult.originCoords;
     region = routeResult.origin;
   } else {
-    const { place: extractedPlace, temporal: intent } = await extractPlaceAndTemporal(query, history);
+    const { place: extractedPlace, temporal: intent, extractionFailed: failed } = await extractPlaceAndTemporal(query, history);
     temporalIntent = intent;
+    extractionFailed = failed;
 
     if (extractedPlace?.toUpperCase() === 'MY_LOCATION') {
       if (myLocationPoint) {
@@ -558,8 +580,12 @@ export async function handleChat(params: {
     evidenceLines += `\n- Location lookup: the user asked about "their location" / "near me", but their device did not share GPS coordinates (permission denied, unavailable, or not requested). The numbers below are for the fallback region "${region}" instead, NOT their actual location. You MUST clearly tell the user their location wasn't available and that you're showing "${region}" instead — do not present the fallback numbers as if they answer where the user actually is.`;
   }
 
+  if (extractionFailed) {
+    evidenceLines += `\n- System note: a temporary AI service issue meant the place/location in the user's question couldn't be processed. The numbers below are for the fallback region "${region}" instead, which may have nothing to do with what was actually asked. You MUST tell the user plainly that you're having trouble understanding their request right now and to try again, rather than presenting this data as if it answers their question.`;
+  }
+
   const synthesized = await synthesizeWithGroq({ query, region, role, evidenceLines, preferredLanguage, history });
-  const text = synthesized || buildTemplateAnswer(findings, region, unresolvedPlace, locationUnavailable, nearbyCyclone);
+  const text = synthesized || buildTemplateAnswer(findings, region, unresolvedPlace, locationUnavailable, nearbyCyclone, extractionFailed);
 
   return {
     text,
