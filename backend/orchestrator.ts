@@ -1,7 +1,7 @@
 import type { AgentFinding, AgentStatus, RoutePoint, LanguageCode } from '../src/types';
 import { LANGUAGES } from '../src/data/languages';
 import { resolveRegion } from './regions';
-import { geocodePlace } from './dataSources/geocoding';
+import { geocodePlace, reverseGeocode } from './dataSources/geocoding';
 import { checkGeofence } from './dataSources/eez';
 import { findNearbyCyclone } from './dataSources/gdacs';
 import { planRoute, planRouteToNearestPfz } from './route';
@@ -163,7 +163,7 @@ ${params.evidenceLines}`;
 // the place is still whatever was last discussed. Returns null only if no
 // place has ever come up (or Groq is unavailable).
 async function extractPlaceName(query: string, history: ConversationTurn[] = []): Promise<string | null> {
-  const systemPrompt = `Extract the core place, city, or beach name being discussed in the user's LATEST question about Indian coastal waters — the question may be in English or any Indian regional language. Strip generic descriptor words like "coast", "sea", "waters", "area" unless they're part of the official name (e.g. keep "Marina Beach" as-is, but for "Chennai coast" extract just "Chennai"). If the latest question doesn't name a place but is a natural follow-up to the conversation (e.g. "what about tomorrow?", "is it safe there?", "and the wind?"), infer the place from the conversation history instead. Reply with ONLY the place name (transliterated to English/Latin script) and nothing else. If no place has been mentioned anywhere in the conversation, reply with exactly: NONE`;
+  const systemPrompt = `Extract the core place, city, or beach name being discussed in the user's LATEST question about Indian coastal waters — the question may be in English or any Indian regional language. Strip generic descriptor words like "coast", "sea", "waters", "area" unless they're part of the official name (e.g. keep "Marina Beach" as-is, but for "Chennai coast" extract just "Chennai"). If the user refers to their own current position (e.g. "near me", "my location", "where I am", "my current position"), reply with exactly: MY_LOCATION. If the latest question doesn't name a place but is a natural follow-up to the conversation (e.g. "what about tomorrow?", "is it safe there?", "and the wind?"), infer the place from the conversation history instead. Reply with ONLY the place name (transliterated to English/Latin script) and nothing else. If no place has been mentioned anywhere in the conversation, reply with exactly: NONE`;
 
   const result = await callGroq(systemPrompt, query, { maxTokens: 200, history });
   if (!result || result.toUpperCase() === 'NONE') return null;
@@ -337,10 +337,12 @@ async function extractTemporalIntent(query: string, history: ConversationTurn[] 
   return { daysAhead: n, dateLabel: label || `${n} day(s) from now` };
 }
 
-function buildTemplateAnswer(findings: AgentFinding[], region: string, unresolvedPlace: string | null): string {
+function buildTemplateAnswer(findings: AgentFinding[], region: string, unresolvedPlace: string | null, locationUnavailable = false): string {
   const [temp, chl, weather, tide] = findings;
   const prefix = unresolvedPlace
     ? `I couldn't locate "${unresolvedPlace}". Showing the nearest available data for ${region} instead. `
+    : locationUnavailable
+    ? `Your location wasn't available. Showing the nearest available data for ${region} instead. `
     : '';
   return (
     prefix +
@@ -363,8 +365,9 @@ export async function handleChat(params: {
   role: string;
   preferredLanguage?: LanguageCode;
   history?: ConversationTurn[];
+  deviceLocation?: { lat: number; lon: number };
 }): Promise<ChatResult> {
-  const { query, role, preferredLanguage, history = [] } = params;
+  const { query, role, preferredLanguage, history = [], deviceLocation } = params;
 
   // Run in parallel with route extraction — a coast-wide survey question
   // ("which regions look good?") takes a completely different path from
@@ -383,11 +386,26 @@ export async function handleChat(params: {
   let region = params.region;
   let unresolvedPlace: string | null = null;
   let temporalIntent: TemporalIntent = null;
+  let locationUnavailable = false;
+
+  // Real device GPS, reverse-geocoded to a human-readable name — used for
+  // both the route CURRENT_LOCATION token and the single-place MY_LOCATION
+  // token below, preferring the user's actual position over the dropdown
+  // region default whenever it's actually available.
+  const myLocationPoint = deviceLocation
+    ? (await reverseGeocode(deviceLocation.lat, deviceLocation.lon)) ?? {
+        displayName: 'your current location',
+        lat: deviceLocation.lat,
+        lon: deviceLocation.lon,
+      }
+    : null;
 
   let routeResult = null as Awaited<ReturnType<typeof planRoute>>;
   if (routeEndpoints) {
     const originArg =
-      routeEndpoints.origin.toUpperCase() === 'CURRENT_LOCATION' ? { displayName: region, lat: coords.lat, lon: coords.lon } : routeEndpoints.origin;
+      routeEndpoints.origin.toUpperCase() === 'CURRENT_LOCATION'
+        ? myLocationPoint ?? { displayName: region, lat: coords.lat, lon: coords.lon }
+        : routeEndpoints.origin;
     routeResult =
       routeEndpoints.destination.toUpperCase() === 'NEAREST_PFZ'
         ? await planRouteToNearestPfz(originArg)
@@ -406,7 +424,17 @@ export async function handleChat(params: {
     ]);
     temporalIntent = intent;
 
-    if (extractedPlace) {
+    if (extractedPlace?.toUpperCase() === 'MY_LOCATION') {
+      if (myLocationPoint) {
+        coords = { lat: myLocationPoint.lat, lon: myLocationPoint.lon };
+        region = myLocationPoint.displayName;
+      } else {
+        // Asked about "my location" but the device never shared GPS
+        // (denied/unsupported) — be honest about that instead of quietly
+        // answering for the unrelated dropdown default.
+        locationUnavailable = true;
+      }
+    } else if (extractedPlace) {
       const geocoded = await geocodePlace(extractedPlace);
       if (geocoded) {
         coords = { lat: geocoded.lat, lon: geocoded.lon };
@@ -505,8 +533,12 @@ export async function handleChat(params: {
     evidenceLines += `\n- Location lookup: the user asked about "${unresolvedPlace}", but this place could not be found. The numbers below are for the fallback region "${region}" instead, NOT for "${unresolvedPlace}". You MUST clearly tell the user "${unresolvedPlace}" could not be located, and that you're showing "${region}" instead as the nearest available data — do not present the fallback numbers as if they answer the original question.`;
   }
 
+  if (locationUnavailable) {
+    evidenceLines += `\n- Location lookup: the user asked about "their location" / "near me", but their device did not share GPS coordinates (permission denied, unavailable, or not requested). The numbers below are for the fallback region "${region}" instead, NOT their actual location. You MUST clearly tell the user their location wasn't available and that you're showing "${region}" instead — do not present the fallback numbers as if they answer where the user actually is.`;
+  }
+
   const synthesized = await synthesizeWithGroq({ query, region, role, evidenceLines, preferredLanguage, history });
-  const text = synthesized || buildTemplateAnswer(findings, region, unresolvedPlace);
+  const text = synthesized || buildTemplateAnswer(findings, region, unresolvedPlace, locationUnavailable);
 
   return {
     text,

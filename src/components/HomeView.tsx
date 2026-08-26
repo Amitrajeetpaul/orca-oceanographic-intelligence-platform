@@ -69,6 +69,11 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user, messag
   const [suggestionDismissed, setSuggestionDismissed] = useState(false);
   const [locationIssue, setLocationIssue] = useState<'denied' | 'unavailable' | 'unsupported' | null>(null);
   const [locationIssueDismissed, setLocationIssueDismissed] = useState(false);
+  // Real GPS coords, sent along with chat requests so "conditions near me"
+  // can resolve to where the user actually is instead of the selected
+  // region — populated by the same permission request as the proactive
+  // nearby-region suggestion below, no extra prompt needed.
+  const [deviceLocation, setDeviceLocation] = useState<{ lat: number; lon: number } | null>(null);
 
   const regionCoords = resolveRegionCoords(selectedRegion);
   const [mapCenter, setMapCenter] = useState(regionCoords);
@@ -92,6 +97,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user, messag
     setLocationIssue(null);
     navigator.geolocation.getCurrentPosition(
       (position) => {
+        setDeviceLocation({ lat: position.coords.latitude, lon: position.coords.longitude });
         const nearest = findNearestRegion({
           lat: position.coords.latitude,
           lon: position.coords.longitude,
@@ -309,6 +315,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user, messag
           role: user.role,
           preferredLanguage: user.language,
           history,
+          deviceLocation,
         }),
       });
 
