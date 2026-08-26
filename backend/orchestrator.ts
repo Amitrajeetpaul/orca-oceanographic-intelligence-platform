@@ -10,6 +10,7 @@ import { runChlorophyllAgent } from './agents/chlorophyllAgent';
 import { runWeatherAgent, runForecastAgent } from './agents/weatherAgent';
 import { runTideAgent } from './agents/tideAgent';
 import { scanAllRegions } from './regionScan';
+import { getRegionTrends, Trend } from './trendAnalysis';
 
 export interface ConversationTurn {
   role: 'user' | 'assistant';
@@ -191,12 +192,29 @@ async function extractRouteEndpoints(
 async function extractMultiRegionIntent(query: string, history: ConversationTurn[] = []): Promise<'favorable' | 'avoid' | null> {
   const systemPrompt = `The user is asking about Indian coastal waters, possibly in a regional Indian language. Determine if their LATEST message is asking to SURVEY OR COMPARE conditions across MULTIPLE regions/zones spanning the coast — NOT about one specific named place. Two kinds: (1) asking which regions currently look FAVORABLE for fishing (high chlorophyll, good sea temperature, productive conditions) — reply exactly: FAVORABLE. (2) asking which regions/zones should be AVOIDED right now due to hazardous conditions or maritime boundary restrictions — reply exactly: AVOID. If the question names one specific place, or isn't this kind of broad multi-region survey, reply exactly: NONE`;
 
-  const result = await callGroq(systemPrompt, query, { maxTokens: 50, history });
+  // Bumped from 50 to 100 as a precaution — the same class of bug as
+  // extractTrendAnalysisIntent (too little headroom for this reasoning
+  // model's hidden "thinking" tokens can silently return empty content)
+  // wasn't observed here in testing, but the margin was thin.
+  const result = await callGroq(systemPrompt, query, { maxTokens: 100, history });
   if (!result) return null;
   const trimmed = result.trim().toUpperCase();
   if (trimmed === 'FAVORABLE') return 'favorable';
   if (trimmed === 'AVOID') return 'avoid';
   return null;
+}
+
+// Detects "why has X changed/declined?" style questions — these need a
+// real 30-day trend, not just today's snapshot, to reason about honestly.
+async function extractTrendAnalysisIntent(query: string, history: ConversationTurn[] = []): Promise<boolean> {
+  const systemPrompt = `The user is asking about Indian coastal waters, possibly in a regional Indian language. Determine if their LATEST message is asking WHY something has CHANGED, DECLINED, IMPROVED, or is DIFFERENT compared to before (e.g. "why has fish productivity declined here?", "has chlorophyll dropped recently?", "why are catches worse than last month?") — a question that needs a TREND over time, not just today's snapshot. Reply with exactly: YES if so. Otherwise reply with exactly: NO`;
+
+  // maxTokens must leave enough room for this reasoning model's hidden
+  // "thinking" tokens before the actual YES/NO — 20 was too tight and the
+  // model spent the whole budget reasoning, returning empty content every
+  // time (confirmed directly: reasoning correctly said "yes", content was "").
+  const result = await callGroq(systemPrompt, query, { maxTokens: 100, history });
+  return result?.trim().toUpperCase() === 'YES';
 }
 
 const POTENTIAL_RANK: Record<'High' | 'Moderate' | 'Low', number> = { High: 2, Moderate: 1, Low: 0 };
@@ -351,7 +369,11 @@ export async function handleChat(params: {
   // Run in parallel with route extraction — a coast-wide survey question
   // ("which regions look good?") takes a completely different path from
   // the rest of this function, so branch out immediately if detected.
-  const [routeEndpoints, multiRegionMode] = await Promise.all([extractRouteEndpoints(query, history), extractMultiRegionIntent(query, history)]);
+  const [routeEndpoints, multiRegionMode, wantsTrendAnalysis] = await Promise.all([
+    extractRouteEndpoints(query, history),
+    extractMultiRegionIntent(query, history),
+    extractTrendAnalysisIntent(query, history),
+  ]);
 
   if (multiRegionMode) {
     return handleMultiRegionQuery({ mode: multiRegionMode, query, role, preferredLanguage, history });
@@ -406,13 +428,14 @@ export async function handleChat(params: {
       ? runForecastAgent(coords.lat, coords.lon, temporalIntent.daysAhead, temporalIntent.dateLabel)
       : runWeatherAgent(coords.lat, coords.lon);
 
-  const [tempFinding, chlResult, weatherFinding, tideFinding, geofence, nearbyCyclone] = await Promise.all([
+  const [tempFinding, chlResult, weatherFinding, tideFinding, geofence, nearbyCyclone, regionTrends] = await Promise.all([
     runTemperatureAgent(coords.lat, coords.lon),
     runChlorophyllAgent(coords.lat, coords.lon),
     weatherPromise,
     runTideAgent(coords.lat, coords.lon),
     routeResult ? Promise.resolve(null) : checkGeofence(coords.lat, coords.lon),
     findNearbyCyclone(coords.lat, coords.lon),
+    wantsTrendAnalysis ? getRegionTrends(coords.lat, coords.lon) : Promise.resolve(null),
   ]);
 
   const findings: AgentFinding[] = [tempFinding, chlResult.finding, weatherFinding, tideFinding];
@@ -462,6 +485,21 @@ export async function handleChat(params: {
         nearbyCyclone.distanceKm
       )}km away (${nearbyCyclone.cyclone.severityText}, GDACS alert level: ${nearbyCyclone.cyclone.alertLevel}). This is a real, current hazard — you MUST warn the user about this clearly.`
     : `\n- Cyclone Alert [GDACS, EU JRC/UN OCHA via NOAA/JTWC]: No active tropical cyclone within 500km of this location right now.`;
+
+  if (regionTrends) {
+    const describeTrend = (label: string, unit: string, t: Trend | null) =>
+      t
+        ? `${label} averaged ${t.firstHalfAvg.toFixed(2)}${unit} in the first half of the last 30 days vs ${t.secondHalfAvg.toFixed(2)}${unit} in the second half (${
+            t.pctChange >= 0 ? '+' : ''
+          }${t.pctChange.toFixed(1)}%, trending ${t.direction === 'flat' ? 'roughly flat' : t.direction})`
+        : `${label}: not enough historical data to compute a trend`;
+
+    evidenceLines += `\n- 30-Day Trend Analysis [Copernicus Marine, real daily history]: ${describeTrend('Chlorophyll (fish-productivity proxy)', ' mg/m³', regionTrends.chl)}. ${describeTrend(
+      'Sea surface temperature',
+      '°C',
+      regionTrends.sst
+    )}. IMPORTANT: the user is asking WHY something changed. You may reason from these two real trends together — e.g. rising SST alongside falling chlorophyll can indicate reduced upwelling/nutrient mixing, a real oceanographic mechanism — but you MUST frame this as a PLAUSIBLE CONTRIBUTING FACTOR inferred from correlation, not a confirmed or complete cause. Explicitly note that other factors (fishing pressure, pollution, currents, local conditions) cannot be ruled out from this data alone. If both trends are flat/insignificant or data is insufficient, say so honestly instead of inventing a decline or a cause that isn't supported.`;
+  }
 
   if (unresolvedPlace) {
     evidenceLines += `\n- Location lookup: the user asked about "${unresolvedPlace}", but this place could not be found. The numbers below are for the fallback region "${region}" instead, NOT for "${unresolvedPlace}". You MUST clearly tell the user "${unresolvedPlace}" could not be located, and that you're showing "${region}" instead as the nearest available data — do not present the fallback numbers as if they answer the original question.`;
