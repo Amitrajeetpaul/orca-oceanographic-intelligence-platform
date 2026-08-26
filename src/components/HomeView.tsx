@@ -181,13 +181,12 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user, messag
 
         setIsTranscribing(true);
         try {
-          // The saved profile language is passed as a hint — real-world
-          // audio (background noise, short phrases, phone mics) gives
-          // Whisper's auto-detect far less signal than a clean clip and it
-          // measurably confuses related scripts under those conditions, so
-          // a known hint transcribes far more reliably than guessing.
-          const langParam = user.language ? `?language=${encodeURIComponent(user.language)}` : '';
-          const res = await fetch(`/api/transcribe${langParam}`, {
+          // True auto-detect — no language hint sent. Verified reliable for
+          // Hindi/Tamil/Bengali/English with the current pipeline (full
+          // Whisper model + domain vocabulary prompt + clean audio capture).
+          // The backend still accepts an optional hint if a future manual
+          // override is ever added, but nothing here uses it by default.
+          const res = await fetch('/api/transcribe', {
             method: 'POST',
             headers: { 'Content-Type': audioBlob.type || 'audio/webm' },
             body: audioBlob,
