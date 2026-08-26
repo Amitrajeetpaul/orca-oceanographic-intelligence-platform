@@ -8,6 +8,7 @@ import { runTemperatureAgent } from './agents/temperatureAgent';
 import { runChlorophyllAgent } from './agents/chlorophyllAgent';
 import { runWeatherAgent, runForecastAgent } from './agents/weatherAgent';
 import { runTideAgent } from './agents/tideAgent';
+import { scanAllRegions } from './regionScan';
 
 export interface ConversationTurn {
   role: 'user' | 'assistant';
@@ -182,6 +183,113 @@ async function extractRouteEndpoints(
   return { origin, destination };
 }
 
+// Detects broad, coast-wide survey questions ("which regions look good for
+// fishing?", "which zones should I avoid?") as distinct from a question
+// about one specific named place — these need a scan across every known
+// region instead of the single-location agent pipeline.
+async function extractMultiRegionIntent(query: string, history: ConversationTurn[] = []): Promise<'favorable' | 'avoid' | null> {
+  const systemPrompt = `The user is asking about Indian coastal waters, possibly in a regional Indian language. Determine if their LATEST message is asking to SURVEY OR COMPARE conditions across MULTIPLE regions/zones spanning the coast — NOT about one specific named place. Two kinds: (1) asking which regions currently look FAVORABLE for fishing (high chlorophyll, good sea temperature, productive conditions) — reply exactly: FAVORABLE. (2) asking which regions/zones should be AVOIDED right now due to hazardous conditions or maritime boundary restrictions — reply exactly: AVOID. If the question names one specific place, or isn't this kind of broad multi-region survey, reply exactly: NONE`;
+
+  const result = await callGroq(systemPrompt, query, { maxTokens: 50, history });
+  if (!result) return null;
+  const trimmed = result.trim().toUpperCase();
+  if (trimmed === 'FAVORABLE') return 'favorable';
+  if (trimmed === 'AVOID') return 'avoid';
+  return null;
+}
+
+const POTENTIAL_RANK: Record<'High' | 'Moderate' | 'Low', number> = { High: 2, Moderate: 1, Low: 0 };
+
+// A separate path from the single-location pipeline — scans every known
+// region live (regionScan.ts) and hands the model a coast-wide summary
+// instead of one place's evidence. Directly answers two PS example
+// queries: "which regions show high chlorophyll + favourable SST" and
+// "which zones should be avoided due to hazardous conditions or geofencing".
+async function handleMultiRegionQuery(params: {
+  mode: 'favorable' | 'avoid';
+  query: string;
+  role: string;
+  preferredLanguage?: LanguageCode;
+  history: ConversationTurn[];
+}): Promise<ChatResult> {
+  const { mode, query, role, preferredLanguage, history } = params;
+  const scan = await scanAllRegions();
+
+  let evidenceLines: string;
+  let summaryValue: string;
+
+  if (mode === 'favorable') {
+    const ranked = [...scan].sort((a, b) => POTENTIAL_RANK[b.pfzPotential] - POTENTIAL_RANK[a.pfzPotential]);
+    evidenceLines = ranked
+      .map(
+        (r) =>
+          `- ${r.region}: SST ${r.sst !== null ? r.sst.toFixed(1) + '°C' : 'unavailable'}, Chlorophyll ${
+            r.chl !== null ? r.chl.toFixed(2) + ' mg/m³' : 'unavailable'
+          } — ${r.pfzPotential} potential`
+      )
+      .join('\n');
+    const highCount = ranked.filter((r) => r.pfzPotential === 'High').length;
+    summaryValue = `${highCount} region${highCount === 1 ? '' : 's'} with High potential`;
+  } else {
+    const toAvoid = scan.filter((r) => r.hazardous || r.nearForeignWaters);
+    evidenceLines =
+      toAvoid.length > 0
+        ? toAvoid
+            .map((r) => {
+              const reasons = [
+                r.hazardous ? `hazardous conditions (${r.hazardReason})` : null,
+                r.nearForeignWaters ? `near/inside ${r.foreignTerritory} waters` : null,
+              ].filter(Boolean);
+              return `- ${r.region}: ${reasons.join('; ')}`;
+            })
+            .join('\n')
+        : 'No monitored region currently shows hazardous conditions or maritime boundary concerns.';
+    summaryValue = `${toAvoid.length} region${toAvoid.length === 1 ? '' : 's'} flagged`;
+  }
+
+  const summaryFinding: AgentFinding = {
+    agentName: 'Regional Survey Agent',
+    type: mode === 'favorable' ? 'chlorophyll' : 'weather',
+    sourceName: 'INCOIS live SST/chlorophyll grid, Open-Meteo, VLIZ Marine Regions',
+    sourceUrl: 'https://incois.gov.in',
+    timestamp: new Date().toISOString(),
+    confidence: 90,
+    metric: mode === 'favorable' ? 'Coast-wide Fishing Potential Survey' : 'Coast-wide Hazard/Boundary Survey',
+    value: summaryValue,
+    rawFindings: evidenceLines,
+    status: 'completed',
+  };
+
+  const evidenceBlock = `- Regional Survey Agent [live scan across ${scan.length} monitored regions]:\n${evidenceLines}`;
+  const synthesized = await synthesizeWithGroq({
+    query,
+    region: 'all monitored regions',
+    role,
+    evidenceLines: evidenceBlock,
+    preferredLanguage,
+    history,
+  });
+  const text = synthesized || evidenceLines;
+
+  const best = mode === 'favorable' ? [...scan].sort((a, b) => POTENTIAL_RANK[b.pfzPotential] - POTENTIAL_RANK[a.pfzPotential])[0] : scan[0];
+
+  return {
+    text,
+    source: 'INCOIS, Open-Meteo, VLIZ Marine Regions | Live coast-wide scan',
+    agents: [toAgentStatus(summaryFinding)],
+    findings: [summaryFinding],
+    resolvedLocation: { lat: 15.0, lon: 78.0, label: 'All monitored regions' },
+    pfzDetails: {
+      distance: 'coast-wide',
+      bearing: '—',
+      sst: best?.sst !== null && best?.sst !== undefined ? `${best.sst.toFixed(1)}°C` : 'n/a',
+      chlorophyll: best?.chl !== null && best?.chl !== undefined ? `${best.chl.toFixed(2)} mg/m³` : 'n/a',
+      depth: 'n/a',
+      potential: best?.pfzPotential ?? 'Low',
+    },
+  };
+}
+
 export type TemporalIntent = { daysAhead: number; dateLabel: string } | 'too_far' | null;
 
 // Detects genuinely future-dated questions ("what about tomorrow?", "safe
@@ -236,14 +344,20 @@ export async function handleChat(params: {
 }): Promise<ChatResult> {
   const { query, role, preferredLanguage, history = [] } = params;
 
+  // Run in parallel with route extraction — a coast-wide survey question
+  // ("which regions look good?") takes a completely different path from
+  // the rest of this function, so branch out immediately if detected.
+  const [routeEndpoints, multiRegionMode] = await Promise.all([extractRouteEndpoints(query, history), extractMultiRegionIntent(query, history)]);
+
+  if (multiRegionMode) {
+    return handleMultiRegionQuery({ mode: multiRegionMode, query, role, preferredLanguage, history });
+  }
+
   let coords = resolveRegion(params.region);
   let region = params.region;
   let unresolvedPlace: string | null = null;
   let temporalIntent: TemporalIntent = null;
 
-  // A route question resolves both endpoints via geocoding + samples real
-  // weather along the path; otherwise fall back to single-place extraction.
-  const routeEndpoints = await extractRouteEndpoints(query, history);
   let routeResult = null as Awaited<ReturnType<typeof planRoute>>;
   if (routeEndpoints) {
     const originArg =
