@@ -11,6 +11,11 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
+        // We register the service worker ourselves in main.tsx (via
+        // virtual:pwa-register) so we can force an immediate reload the
+        // moment a new version takes control — the default auto-injected
+        // script only updates silently in the background.
+        injectRegister: false,
         includeAssets: ['icons/favicon-32.png', 'icons/apple-touch-icon.png'],
         manifest: {
           name: 'ORCA — Ocean Intelligence',
