@@ -174,8 +174,25 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    // The service worker, its registration script, the manifest, and
+    // index.html itself must always be revalidated — without this,
+    // browsers can hold onto a stale sw.js under normal HTTP caching and
+    // never even discover a new build exists, leaving users stuck on old
+    // (previously: mock-data) code indefinitely despite registerType:
+    // 'autoUpdate'. The actual JS/CSS bundles are safe to cache
+    // aggressively since Vite content-hashes their filenames.
+    const NO_CACHE_FILES = new Set(['sw.js', 'registerSW.js', 'manifest.webmanifest', 'index.html']);
+    app.use(
+      express.static(distPath, {
+        setHeaders: (res, filePath) => {
+          if (NO_CACHE_FILES.has(path.basename(filePath))) {
+            res.setHeader('Cache-Control', 'no-cache');
+          }
+        },
+      })
+    );
     app.get('*', (req, res) => {
+      res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
