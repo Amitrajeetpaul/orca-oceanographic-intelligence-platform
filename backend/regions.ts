@@ -68,3 +68,47 @@ export function matchStateToRegion(placeName: string): { name: string; coords: R
   }
   return null;
 }
+
+// Major coastal cities not already covered by a REGIONS key or state name —
+// real, well-known place-to-region mappings, not fabricated coordinates.
+const CITY_ALIASES: [string, string][] = [
+  ['chennai', 'North Tamil Nadu'],
+  ['madras', 'North Tamil Nadu'],
+  ['mumbai', 'Maharashtra Coast'],
+  ['bombay', 'Maharashtra Coast'],
+  ['visakhapatnam', 'North Andhra Pradesh'],
+  ['vizag', 'North Andhra Pradesh'],
+  ['mangalore', 'Karnataka Coast'],
+  ['mangaluru', 'Karnataka Coast'],
+  ['kolkata', 'West Bengal Coast'],
+  ['calcutta', 'West Bengal Coast'],
+  ['surat', 'Gujarat Coast'],
+  ['puri', 'Odisha Coast'],
+  ['panaji', 'Goa Coast'],
+  ['panjim', 'Goa Coast'],
+];
+
+// A direct, Groq-free match against known region/state/city names — used
+// as a fallback when the AI extraction call itself fails (timeout, rate
+// limit) rather than leaving a well-known place name unresolved. Checked
+// against the RAW query text with word boundaries (not a naive substring)
+// so it doesn't misfire inside unrelated words. This intentionally only
+// covers places we already have real, verified coordinates for — it's not
+// a replacement for Groq's broader free-text/multilingual understanding,
+// just a safety net for the common case of a plain, well-known name.
+export function quickMatchPlaceInQuery(query: string): { name: string; coords: RegionCoords } | null {
+  const lower = query.toLowerCase();
+  const hasWord = (fragment: string) => new RegExp(`\\b${fragment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(lower);
+
+  for (const [stateFragment, regionName] of STATE_TO_REGION) {
+    if (hasWord(stateFragment)) return { name: regionName, coords: REGIONS[regionName] };
+  }
+  for (const [cityFragment, regionName] of CITY_ALIASES) {
+    if (hasWord(cityFragment)) return { name: regionName, coords: REGIONS[regionName] };
+  }
+  for (const [regionName, coords] of Object.entries(REGIONS)) {
+    const shortName = regionName.replace(/\s+(coast|offshore|islands)$/i, '');
+    if (hasWord(shortName)) return { name: regionName, coords };
+  }
+  return null;
+}

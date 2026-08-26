@@ -1,6 +1,6 @@
 import type { AgentFinding, AgentStatus, RoutePoint, LanguageCode } from '../src/types';
 import { LANGUAGES } from '../src/data/languages';
-import { resolveRegion, matchStateToRegion } from './regions';
+import { resolveRegion, matchStateToRegion, quickMatchPlaceInQuery } from './regions';
 import { geocodePlace, reverseGeocode } from './dataSources/geocoding';
 import { checkGeofence } from './dataSources/eez';
 import { findNearbyCyclone, NearbyCyclone } from './dataSources/gdacs';
@@ -455,9 +455,25 @@ export async function handleChat(params: {
     coords = routeResult.originCoords;
     region = routeResult.origin;
   } else {
-    const { place: extractedPlace, temporal: intent, extractionFailed: failed } = await extractPlaceAndTemporal(query, history);
+    const { place: extractedPlaceRaw, temporal: intent, extractionFailed: failed } = await extractPlaceAndTemporal(query, history);
     temporalIntent = intent;
     extractionFailed = failed;
+
+    // Groq-free rescue: if the AI extraction call itself failed (not a
+    // legitimate "no place found"), try a direct match against known
+    // region/state/city names before giving up. This is exactly the
+    // common case that was failing in practice — a plain, well-known
+    // place name — and doesn't need Groq to resolve at all.
+    let extractedPlace = extractedPlaceRaw;
+    if (failed) {
+      const quickMatch = quickMatchPlaceInQuery(query);
+      if (quickMatch) {
+        coords = quickMatch.coords;
+        region = quickMatch.name;
+        extractionFailed = false;
+        extractedPlace = null; // already resolved directly, skip the normal place-handling branch below
+      }
+    }
 
     if (extractedPlace?.toUpperCase() === 'MY_LOCATION') {
       if (myLocationPoint) {
