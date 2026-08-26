@@ -1,6 +1,6 @@
 import type { AgentFinding, AgentStatus, RoutePoint, LanguageCode } from '../src/types';
 import { LANGUAGES } from '../src/data/languages';
-import { resolveRegion } from './regions';
+import { resolveRegion, matchStateToRegion } from './regions';
 import { geocodePlace, reverseGeocode } from './dataSources/geocoding';
 import { checkGeofence } from './dataSources/eez';
 import { findNearbyCyclone, NearbyCyclone } from './dataSources/gdacs';
@@ -172,7 +172,7 @@ async function extractPlaceAndTemporal(query: string, history: ConversationTurn[
 
   const systemPrompt = `Today is ${todayDow}, ${todayStr}. Analyze the user's LATEST question about Indian coastal waters — English or any Indian regional language, possibly with voice-transcription noise. Reply with EXACTLY two fields separated by "###", nothing else: PLACE###TEMPORAL
 
-PLACE: extract the core place, city, or beach name being discussed. Strip generic descriptor words like "coast", "sea", "waters", "area" unless they're part of the official name (e.g. keep "Marina Beach" as-is, but for "Chennai coast" extract just "Chennai"). If the user refers to their own current position ("near me", "my location", "where I am"), reply MY_LOCATION. If the latest question doesn't name a place but is a natural follow-up to the conversation (e.g. "what about tomorrow?", "is it safe there?"), infer the place from conversation history instead. Reply NONE if no place has been mentioned anywhere in the conversation.
+PLACE: extract the core place being discussed — this includes a city, beach, port, or coastal town, but ALSO a state or larger region (e.g. "Tamil Nadu", "Kerala", "Gujarat", "Bay of Bengal") when that's what the user actually named. Strip generic descriptor words like "coast", "sea", "waters", "area" unless they're part of the official name (e.g. keep "Marina Beach" as-is, but for "Chennai coast" extract just "Chennai"; for "Tamil Nadu coast" extract just "Tamil Nadu"). If the user refers to their own current position ("near me", "my location", "where I am"), reply MY_LOCATION. If the latest question doesn't name a place but is a natural follow-up to the conversation (e.g. "what about tomorrow?", "is it safe there?"), infer the place from conversation history instead. Reply NONE only if truly no place of any kind (city, beach, state, or region) has been mentioned anywhere in the conversation.
 
 TEMPORAL: determine if the question (using history to resolve follow-ups like "what about tomorrow?") is asking about a FUTURE day rather than right now/today. Reply NOW if about now/today or no clear future reference. Reply N|label if it names a future day within 7 days (N = integer 1-7, label = short text like "tomorrow" or "Friday" — use a pipe between N and label here). Reply TOO_FAR if asking about something more than 7 days away.
 
@@ -448,8 +448,16 @@ export async function handleChat(params: {
         locationUnavailable = true;
       }
     } else if (extractedPlace) {
-      const geocoded = await geocodePlace(extractedPlace);
-      if (geocoded) {
+      // A bare state name ("Tamil Nadu", "Kerala") geocodes via Nominatim
+      // to that state's administrative centroid — usually an inland point
+      // with no real marine data. Prefer one of our own pre-verified
+      // offshore points for that state when the name matches one.
+      const stateMatch = matchStateToRegion(extractedPlace);
+      const geocoded = stateMatch ? null : await geocodePlace(extractedPlace);
+      if (stateMatch) {
+        coords = stateMatch.coords;
+        region = stateMatch.name;
+      } else if (geocoded) {
         coords = { lat: geocoded.lat, lon: geocoded.lon };
         region = geocoded.displayName;
       } else {

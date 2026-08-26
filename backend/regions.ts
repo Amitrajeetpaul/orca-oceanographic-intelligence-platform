@@ -35,3 +35,36 @@ export function resolveRegion(name: string): RegionCoords {
 export function getAllRegions(): { name: string; coords: RegionCoords }[] {
   return Object.entries(REGIONS).map(([name, coords]) => ({ name, coords }));
 }
+
+// A bare state name ("Tamil Nadu", "Kerala") geocodes via Nominatim to that
+// state's administrative centroid — usually an INLAND point with no real
+// SST/chlorophyll data (land pixel). Matching it to one of our own
+// pre-verified offshore points instead gives a real, usable coastal
+// location for that state rather than nonsense land coordinates. Order
+// matters — checked longest/most-specific name first so "Andhra Pradesh"
+// doesn't accidentally match a substring of something else first.
+const STATE_TO_REGION: [string, string][] = [
+  ['andaman', 'Andaman & Nicobar Islands'],
+  ['nicobar', 'Andaman & Nicobar Islands'],
+  ['lakshadweep', 'Lakshadweep Islands'],
+  ['andhra pradesh', 'South Andhra Pradesh'],
+  ['tamil nadu', 'South Tamil Nadu'],
+  ['west bengal', 'West Bengal Coast'],
+  ['odisha', 'Odisha Coast'],
+  ['orissa', 'Odisha Coast'],
+  ['karnataka', 'Karnataka Coast'],
+  ['maharashtra', 'Maharashtra Coast'],
+  ['gujarat', 'Gujarat Coast'],
+  ['goa', 'Goa Coast'],
+  ['kerala', 'South Kerala Coast'],
+];
+
+export function matchStateToRegion(placeName: string): { name: string; coords: RegionCoords } | null {
+  const normalized = placeName.trim().toLowerCase();
+  for (const [stateFragment, regionName] of STATE_TO_REGION) {
+    if (normalized === stateFragment || normalized.includes(stateFragment)) {
+      return { name: regionName, coords: REGIONS[regionName] };
+    }
+  }
+  return null;
+}
