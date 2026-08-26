@@ -21,7 +21,7 @@ export interface ThemeColors {
 
 export interface AgentFinding {
   agentName: string;
-  type: 'temp' | 'chlorophyll' | 'weather' | 'buoy';
+  type: 'temp' | 'chlorophyll' | 'weather' | 'buoy' | 'tide';
   sourceName: string;
   sourceUrl: string;
   timestamp: string;
@@ -34,7 +34,7 @@ export interface AgentFinding {
 
 export interface AgentStatus {
   name: string;
-  type: 'temp' | 'chlorophyll' | 'weather' | 'buoy';
+  type: 'temp' | 'chlorophyll' | 'weather' | 'buoy' | 'tide';
   status: 'checking' | 'completed' | 'warning';
   value?: string;
   source?: string;

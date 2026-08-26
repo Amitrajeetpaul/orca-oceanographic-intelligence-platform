@@ -7,6 +7,7 @@ import { planRoute, planRouteToNearestPfz } from './route';
 import { runTemperatureAgent } from './agents/temperatureAgent';
 import { runChlorophyllAgent } from './agents/chlorophyllAgent';
 import { runWeatherAgent, runForecastAgent } from './agents/weatherAgent';
+import { runTideAgent } from './agents/tideAgent';
 
 export interface ConversationTurn {
   role: 'user' | 'assistant';
@@ -207,7 +208,7 @@ async function extractTemporalIntent(query: string, history: ConversationTurn[] 
 }
 
 function buildTemplateAnswer(findings: AgentFinding[], region: string, unresolvedPlace: string | null): string {
-  const [temp, chl, weather] = findings;
+  const [temp, chl, weather, tide] = findings;
   const prefix = unresolvedPlace
     ? `I couldn't locate "${unresolvedPlace}". Showing the nearest available data for ${region} instead. `
     : '';
@@ -219,7 +220,10 @@ function buildTemplateAnswer(findings: AgentFinding[], region: string, unresolve
         : `Sea surface temperature data is currently unavailable for ${region}.`,
       chl.confidence > 0 ? `Chlorophyll concentration reads ${chl.value}.` : `Chlorophyll data is currently unavailable.`,
       weather.confidence > 0 ? `Marine conditions: ${weather.value}.` : `Weather data is currently unavailable.`,
-    ].join(' ')
+      tide && tide.confidence > 0 ? `Tide: ${tide.value}.` : '',
+    ]
+      .filter(Boolean)
+      .join(' ')
   );
 }
 
@@ -284,14 +288,15 @@ export async function handleChat(params: {
       ? runForecastAgent(coords.lat, coords.lon, temporalIntent.daysAhead, temporalIntent.dateLabel)
       : runWeatherAgent(coords.lat, coords.lon);
 
-  const [tempFinding, chlResult, weatherFinding, geofence] = await Promise.all([
+  const [tempFinding, chlResult, weatherFinding, tideFinding, geofence] = await Promise.all([
     runTemperatureAgent(coords.lat, coords.lon),
     runChlorophyllAgent(coords.lat, coords.lon),
     weatherPromise,
+    runTideAgent(coords.lat, coords.lon),
     routeResult ? Promise.resolve(null) : checkGeofence(coords.lat, coords.lon),
   ]);
 
-  const findings: AgentFinding[] = [tempFinding, chlResult.finding, weatherFinding];
+  const findings: AgentFinding[] = [tempFinding, chlResult.finding, weatherFinding, tideFinding];
   const agents = findings.map(toAgentStatus);
 
   const liveSourceNames = [...new Set(findings.filter((f) => f.confidence > 0).map((f) => f.sourceName.split(' (')[0]))];

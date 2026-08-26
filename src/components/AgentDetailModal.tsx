@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion } from 'motion/react';
-import { X, Thermometer, Leaf, Wind, CheckCircle2, AlertCircle, ExternalLink, ShieldCheck, Sparkles } from 'lucide-react';
+import { X, Thermometer, Leaf, Wind, Waves, CheckCircle2, AlertCircle, ExternalLink, ShieldCheck, Sparkles } from 'lucide-react';
 import { AgentFinding } from '../types';
 
 interface AgentDetailModalProps {
@@ -83,6 +83,7 @@ export const AgentDetailModal: React.FC<AgentDetailModalProps> = ({
               const isTemp = finding.type === 'temp';
               const isChloro = finding.type === 'chlorophyll';
               const isWeather = finding.type === 'weather';
+              const isTide = finding.type === 'tide';
 
               return (
                 <div
@@ -92,7 +93,7 @@ export const AgentDetailModal: React.FC<AgentDetailModalProps> = ({
                   {/* Status strip top accent */}
                   <div
                     className={`absolute top-0 left-0 right-0 h-1 ${
-                      isTemp ? 'bg-[#1a5490]' : isChloro ? 'bg-[#2e7d32]' : 'bg-[#b36b00]'
+                      isTemp ? 'bg-[#1a5490]' : isChloro ? 'bg-[#2e7d32]' : isTide ? 'bg-[#0d9488]' : 'bg-[#b36b00]'
                     }`}
                   />
 
@@ -105,12 +106,15 @@ export const AgentDetailModal: React.FC<AgentDetailModalProps> = ({
                             ? 'bg-[#1a5490]/10 text-[#1a5490]'
                             : isChloro
                             ? 'bg-[#2e7d32]/10 text-[#2e7d32]'
+                            : isTide
+                            ? 'bg-[#0d9488]/10 text-[#0d9488]'
                             : 'bg-[#b36b00]/10 text-[#b36b00]'
                         }`}
                       >
                         {isTemp && <Thermometer className="w-4 h-4" />}
                         {isChloro && <Leaf className="w-4 h-4" />}
                         {isWeather && <Wind className="w-4 h-4" />}
+                        {isTide && <Waves className="w-4 h-4" />}
                       </div>
                       <div>
                         <h3 className="font-heading text-xs font-bold text-[#22223b]">

@@ -24,6 +24,7 @@ import {
   Mic,
   Volume2,
   Square,
+  Waves,
 } from 'lucide-react';
 import { SAMPLE_PROMPT_CHIPS } from '../data/mockData';
 import { resolveRegionCoords, findNearestRegion } from '../data/regionCoords';
@@ -264,7 +265,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user, messag
       setActiveAgentSteps([{ ...tempAgent }, chloroAgent]);
     }, 700);
 
-    // Step 3: Weather agent check
+    // Step 3: Weather + Tide agent check
     setTimeout(() => {
       const chloroAgent: AgentStatus = {
         name: 'Chlorophyll agent',
@@ -279,10 +280,17 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user, messag
         status: 'checking',
         source: 'Open-Meteo Marine',
       };
+      const tideAgent: AgentStatus = {
+        name: 'Tide agent',
+        type: 'tide',
+        status: 'checking',
+        source: 'Open-Meteo Marine',
+      };
       setActiveAgentSteps([
         { ...tempAgent, status: 'completed', value: '28.5°C' },
         chloroAgent,
         weatherAgent,
+        tideAgent,
       ]);
     }, 1400);
 
@@ -627,12 +635,15 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user, messag
                                   ? 'bg-[#1a5490]/15 text-[#1a5490]'
                                   : agent.type === 'chlorophyll'
                                   ? 'bg-[#2e7d32]/15 text-[#2e7d32]'
+                                  : agent.type === 'tide'
+                                  ? 'bg-[#0d9488]/15 text-[#0d9488]'
                                   : 'bg-[#b36b00]/15 text-[#b36b00]'
                               }`}
                             >
                               {agent.type === 'temp' && <Thermometer className="w-2.5 h-2.5" />}
                               {agent.type === 'chlorophyll' && <Leaf className="w-2.5 h-2.5" />}
                               {agent.type === 'weather' && <Wind className="w-2.5 h-2.5" />}
+                              {agent.type === 'tide' && <Waves className="w-2.5 h-2.5" />}
                             </div>
                             <span className="font-semibold text-[#22223b]">{agent.name}</span>
                           </div>
@@ -769,12 +780,15 @@ export const HomeView: React.FC<HomeViewProps> = ({ selectedRegion, user, messag
                             ? 'bg-[#1a5490]/15 text-[#1a5490]'
                             : agent.type === 'chlorophyll'
                             ? 'bg-[#2e7d32]/15 text-[#2e7d32]'
+                            : agent.type === 'tide'
+                            ? 'bg-[#0d9488]/15 text-[#0d9488]'
                             : 'bg-[#b36b00]/15 text-[#b36b00]'
                         }`}
                       >
                         {agent.type === 'temp' && <Thermometer className="w-2.5 h-2.5" />}
                         {agent.type === 'chlorophyll' && <Leaf className="w-2.5 h-2.5" />}
                         {agent.type === 'weather' && <Wind className="w-2.5 h-2.5" />}
+                        {agent.type === 'tide' && <Waves className="w-2.5 h-2.5" />}
                       </div>
                       <span className="font-semibold text-[#22223b]">
                         {agent.name} {agent.status === 'checking' ? 'checking…' : 'verified'}

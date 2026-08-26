@@ -14,6 +14,19 @@ export interface ForecastReading {
   weatherCode: number | null;
 }
 
+export interface TideEvent {
+  type: 'high' | 'low';
+  time: string;
+  heightM: number;
+}
+
+export interface TideInfo {
+  currentHeightM: number | null;
+  currentTime: string | null;
+  next: TideEvent | null;
+  following: TideEvent | null;
+}
+
 interface CacheEntry {
   data: WeatherReading;
   fetchedAt: number;
@@ -24,8 +37,14 @@ interface ForecastCacheEntry {
   fetchedAt: number;
 }
 
+interface TideCacheEntry {
+  data: TideInfo | null;
+  fetchedAt: number;
+}
+
 const cache = new Map<string, CacheEntry>();
 const forecastCache = new Map<string, ForecastCacheEntry>();
+const tideCache = new Map<string, TideCacheEntry>();
 const CACHE_TTL_MS = 10 * 60 * 1000;
 // Open-Meteo forecasts don't move much within an hour; longer TTL than the
 // "current" reading is fine and avoids repeat calls for the same day.
@@ -116,4 +135,63 @@ export async function getForecastForDay(lat: number, lon: number, daysAhead: num
 
   forecastCache.set(key, { data, fetchedAt: Date.now() });
   return data;
+}
+
+// Real modeled sea-level height (not a fabricated/approximated curve) —
+// Open-Meteo's marine model genuinely shows the expected tidal oscillation
+// (verified: a real semi-diurnal low/high/low/high pattern over 24h at a
+// Kerala coast test point). Finds the next two high/low turning points by
+// scanning for local extrema in the hourly series, the same way a tide
+// table is read off a curve.
+export async function getTideInfo(lat: number, lon: number): Promise<TideInfo> {
+  const key = `${lat.toFixed(2)}:${lon.toFixed(2)}`;
+  const cached = tideCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) return cached.data ?? emptyTideInfo();
+
+  try {
+    const res = await fetch(
+      `https://marine-api.open-meteo.com/v1/marine?latitude=${lat}&longitude=${lon}&hourly=sea_level_height_msl&timezone=auto&forecast_days=2`,
+      { signal: AbortSignal.timeout(8000) }
+    );
+    if (!res.ok) throw new Error(`Open-Meteo marine (sea level) responded ${res.status}`);
+    const data = await res.json();
+    const times: string[] = data.hourly?.time ?? [];
+    const heights: number[] = data.hourly?.sea_level_height_msl ?? [];
+    if (times.length < 3 || heights.length !== times.length) throw new Error('No sea-level series returned');
+
+    const now = Date.now();
+    let currentIdx = 0;
+    for (let i = 0; i < times.length; i++) {
+      if (new Date(times[i]).getTime() <= now) currentIdx = i;
+    }
+
+    const turningPoints: TideEvent[] = [];
+    for (let i = 1; i < heights.length - 1; i++) {
+      if (heights[i] > heights[i - 1] && heights[i] >= heights[i + 1]) {
+        turningPoints.push({ type: 'high', time: times[i], heightM: heights[i] });
+      } else if (heights[i] < heights[i - 1] && heights[i] <= heights[i + 1]) {
+        turningPoints.push({ type: 'low', time: times[i], heightM: heights[i] });
+      }
+    }
+
+    const upcoming = turningPoints.filter((tp) => new Date(tp.time).getTime() > now);
+
+    const info: TideInfo = {
+      currentHeightM: heights[currentIdx] ?? null,
+      currentTime: times[currentIdx] ?? null,
+      next: upcoming[0] ?? null,
+      following: upcoming[1] ?? null,
+    };
+
+    tideCache.set(key, { data: info, fetchedAt: Date.now() });
+    return info;
+  } catch (err) {
+    console.warn('Tide fetch failed:', err instanceof Error ? err.message : err);
+    tideCache.set(key, { data: null, fetchedAt: Date.now() });
+    return emptyTideInfo();
+  }
+}
+
+function emptyTideInfo(): TideInfo {
+  return { currentHeightM: null, currentTime: null, next: null, following: null };
 }
