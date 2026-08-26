@@ -1,5 +1,6 @@
 import { getAllRegions } from './regions';
 import { getWeather } from './dataSources/openMeteo';
+import { getActiveCyclonesNearIndia } from './dataSources/gdacs';
 
 export interface LiveAlert {
   id: string;
@@ -25,6 +26,21 @@ const THUNDERSTORM_CODES = new Set([95, 96, 99]);
 // threshold produce an alert, so a calm day legitimately returns few or none.
 export async function getLiveAlerts(): Promise<LiveAlert[]> {
   const regions = getAllRegions();
+
+  const cyclones = await getActiveCyclonesNearIndia();
+  const cycloneAlerts: LiveAlert[] = cyclones.map((c) => ({
+    id: `cyclone-${c.name.replace(/\s+/g, '-').toLowerCase()}`,
+    title: `Tropical Cyclone ${c.name} — North Indian Ocean`,
+    timeAgo: 'Live',
+    type: 'danger',
+    description: `${c.severityText}. Tracked near ${c.lat.toFixed(1)}°N, ${c.lon.toFixed(1)}°E.`,
+    location: 'North Indian Ocean basin',
+    meta: c.alertLevel,
+    severity: c.alertLevel === 'Red' ? 'High' : c.alertLevel === 'Orange' ? 'Moderate' : 'Notice',
+    coordinates: `${c.lat.toFixed(2)}° N, ${c.lon.toFixed(2)}° E`,
+    actionAdvice: 'Track official IMD/GDACS bulletins before venturing out; avoid the storm\'s projected path entirely.',
+    source: 'GDACS (EU JRC / UN OCHA, via NOAA/JTWC)',
+  }));
 
   const results = await Promise.all(
     regions.map(async ({ name, coords }) => {
@@ -80,5 +96,5 @@ export async function getLiveAlerts(): Promise<LiveAlert[]> {
     })
   );
 
-  return results.filter((a): a is LiveAlert => a !== null);
+  return [...cycloneAlerts, ...results.filter((a): a is LiveAlert => a !== null)];
 }

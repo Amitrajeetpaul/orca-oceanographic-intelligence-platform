@@ -3,6 +3,7 @@ import { LANGUAGES } from '../src/data/languages';
 import { resolveRegion } from './regions';
 import { geocodePlace } from './dataSources/geocoding';
 import { checkGeofence } from './dataSources/eez';
+import { findNearbyCyclone } from './dataSources/gdacs';
 import { planRoute, planRouteToNearestPfz } from './route';
 import { runTemperatureAgent } from './agents/temperatureAgent';
 import { runChlorophyllAgent } from './agents/chlorophyllAgent';
@@ -405,12 +406,13 @@ export async function handleChat(params: {
       ? runForecastAgent(coords.lat, coords.lon, temporalIntent.daysAhead, temporalIntent.dateLabel)
       : runWeatherAgent(coords.lat, coords.lon);
 
-  const [tempFinding, chlResult, weatherFinding, tideFinding, geofence] = await Promise.all([
+  const [tempFinding, chlResult, weatherFinding, tideFinding, geofence, nearbyCyclone] = await Promise.all([
     runTemperatureAgent(coords.lat, coords.lon),
     runChlorophyllAgent(coords.lat, coords.lon),
     weatherPromise,
     runTideAgent(coords.lat, coords.lon),
     routeResult ? Promise.resolve(null) : checkGeofence(coords.lat, coords.lon),
+    findNearbyCyclone(coords.lat, coords.lon),
   ]);
 
   const findings: AgentFinding[] = [tempFinding, chlResult.finding, weatherFinding, tideFinding];
@@ -451,6 +453,15 @@ export async function handleChat(params: {
     };
     evidenceLines += `\n- Maritime Boundary [VLIZ Marine Regions EEZ dataset]: This location is within roughly 15 nautical miles of ${geofence.nearbyTerritory}'s Exclusive Economic Zone boundary. Mention this caution to the user.`;
   }
+
+  // Always stated explicitly, even when clear — "no cyclone found in
+  // evidence" must never be misread as the topic being unavailable/out of
+  // scope for a direct "any cyclone alerts?" question.
+  evidenceLines += nearbyCyclone
+    ? `\n- Cyclone Alert [GDACS, EU JRC/UN OCHA via NOAA/JTWC]: Tropical Cyclone ${nearbyCyclone.cyclone.name} is active roughly ${Math.round(
+        nearbyCyclone.distanceKm
+      )}km away (${nearbyCyclone.cyclone.severityText}, GDACS alert level: ${nearbyCyclone.cyclone.alertLevel}). This is a real, current hazard — you MUST warn the user about this clearly.`
+    : `\n- Cyclone Alert [GDACS, EU JRC/UN OCHA via NOAA/JTWC]: No active tropical cyclone within 500km of this location right now.`;
 
   if (unresolvedPlace) {
     evidenceLines += `\n- Location lookup: the user asked about "${unresolvedPlace}", but this place could not be found. The numbers below are for the fallback region "${region}" instead, NOT for "${unresolvedPlace}". You MUST clearly tell the user "${unresolvedPlace}" could not be located, and that you're showing "${region}" instead as the nearest available data — do not present the fallback numbers as if they answer the original question.`;

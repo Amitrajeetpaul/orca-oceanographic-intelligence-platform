@@ -2,6 +2,7 @@ import { getAllRegions } from './regions';
 import { getGridValue, derivePfzPotential } from './dataSources/incoisWms';
 import { getWeather } from './dataSources/openMeteo';
 import { checkGeofence } from './dataSources/eez';
+import { getActiveCyclonesNearIndia, findNearbyCycloneFromList } from './dataSources/gdacs';
 
 export interface RegionScanResult {
   region: string;
@@ -14,6 +15,7 @@ export interface RegionScanResult {
   hazardReason: string | null;
   nearForeignWaters: boolean;
   foreignTerritory: string | null;
+  nearbyCycloneName: string | null;
 }
 
 // Scans every known coastal region in parallel using the same live INCOIS
@@ -23,6 +25,9 @@ export interface RegionScanResult {
 // named place.
 export async function scanAllRegions(): Promise<RegionScanResult[]> {
   const regions = getAllRegions();
+  // Fetched once and reused per region (cheap distance math only) rather
+  // than a redundant network call per region.
+  const cyclones = await getActiveCyclonesNearIndia();
 
   const results = await Promise.all(
     regions.map(async ({ name, coords }): Promise<RegionScanResult> => {
@@ -35,11 +40,13 @@ export async function scanAllRegions(): Promise<RegionScanResult[]> {
 
       const windKts = weather ? weather.windSpeedKmh / 1.852 : null;
       const wave = weather?.waveHeightM ?? null;
-      const hazardous = (wave !== null && wave > 2) || (windKts !== null && windKts > 20);
+      const nearbyCyclone = findNearbyCycloneFromList(coords.lat, coords.lon, cyclones);
+      const hazardous = (wave !== null && wave > 2) || (windKts !== null && windKts > 20) || !!nearbyCyclone;
 
       let hazardReason: string | null = null;
       if (hazardous) {
         const parts: string[] = [];
+        if (nearbyCyclone) parts.push(`Cyclone ${nearbyCyclone.cyclone.name} ~${Math.round(nearbyCyclone.distanceKm)}km away`);
         if (wave !== null && wave > 2) parts.push(`${wave.toFixed(1)}m waves`);
         if (windKts !== null && windKts > 20) parts.push(`${windKts.toFixed(0)}kt wind`);
         hazardReason = parts.join(', ');
@@ -56,6 +63,7 @@ export async function scanAllRegions(): Promise<RegionScanResult[]> {
         hazardReason,
         nearForeignWaters: !!(geofence?.inForeignWaters || geofence?.nearForeignBoundary),
         foreignTerritory: geofence?.currentTerritory || geofence?.nearbyTerritory || null,
+        nearbyCycloneName: nearbyCyclone?.cyclone.name ?? null,
       };
     })
   );
