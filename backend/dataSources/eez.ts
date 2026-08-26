@@ -32,7 +32,25 @@ interface CacheEntry {
 const cache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // EEZ boundaries don't move
 
-async function fetchTerritory(lat: number, lon: number): Promise<string | null> {
+interface EEZInfo {
+  // Specific territory name (e.g. "Andaman and Nicobar") — for display only.
+  territory: string | null;
+  // Actual owning country — this is what determines foreign vs. domestic.
+  // Overseas territories report their own territory1 (distinct from
+  // mainland "India") but the correct sovereign1 either way — comparing
+  // territory1 against a hardcoded 'India' incorrectly flagged Andaman &
+  // Nicobar Islands as foreign waters (confirmed via raw VLIZ data: that
+  // EEZ record has territory1="Andaman and Nicobar", sovereign1="India").
+  sovereign: string | null;
+}
+
+function parseField(text: string, field: string): string | null {
+  const match = text.match(new RegExp(`^${field}\\s*=\\s*(.+)$`, 'm'));
+  if (!match || match[1].trim().toLowerCase() === 'null') return null;
+  return match[1].trim();
+}
+
+async function fetchEEZInfo(lat: number, lon: number): Promise<EEZInfo> {
   const half = 0.05;
   const bbox = [lon - half, lat - half, lon + half, lat + half].join(',');
   const params = new URLSearchParams({
@@ -58,9 +76,7 @@ async function fetchTerritory(lat: number, lon: number): Promise<string | null> 
   const res = await fetch(`${VLIZ_WMS}?${params.toString()}`, { signal: AbortSignal.timeout(6000) });
   if (!res.ok) throw new Error(`Marine Regions WMS responded ${res.status}`);
   const text = await res.text();
-  const match = text.match(/^territory1\s*=\s*(.+)$/m);
-  if (!match || match[1].trim().toLowerCase() === 'null') return null;
-  return match[1].trim();
+  return { territory: parseField(text, 'territory1'), sovereign: parseField(text, 'sovereign1') };
 }
 
 export async function checkGeofence(lat: number, lon: number): Promise<GeofenceStatus> {
@@ -79,20 +95,24 @@ export async function checkGeofence(lat: number, lon: number): Promise<GeofenceS
 
   try {
     const [center, north, south, east, west] = await Promise.all([
-      fetchTerritory(lat, lon),
-      fetchTerritory(lat + RING_OFFSET_DEG, lon),
-      fetchTerritory(lat - RING_OFFSET_DEG, lon),
-      fetchTerritory(lat, lon + RING_OFFSET_DEG),
-      fetchTerritory(lat, lon - RING_OFFSET_DEG),
+      fetchEEZInfo(lat, lon),
+      fetchEEZInfo(lat + RING_OFFSET_DEG, lon),
+      fetchEEZInfo(lat - RING_OFFSET_DEG, lon),
+      fetchEEZInfo(lat, lon + RING_OFFSET_DEG),
+      fetchEEZInfo(lat, lon - RING_OFFSET_DEG),
     ]);
 
-    const differing = [north, south, east, west].find((t) => t !== null && t !== center);
+    // A ring point counts as a different, foreign country only when its
+    // sovereign differs from the center's AND isn't India — two Indian
+    // territories (mainland vs. an island group) bordering each other
+    // isn't a real "approaching foreign waters" situation.
+    const differing = [north, south, east, west].find((r) => r.sovereign !== null && r.sovereign !== center.sovereign && r.sovereign !== 'India');
 
     const status: GeofenceStatus = {
-      currentTerritory: center,
-      inForeignWaters: center !== null && center !== 'India',
+      currentTerritory: center.territory ?? center.sovereign,
+      inForeignWaters: center.sovereign !== null && center.sovereign !== 'India',
       nearForeignBoundary: !!differing,
-      nearbyTerritory: differing ?? null,
+      nearbyTerritory: differing ? differing.territory ?? differing.sovereign : null,
     };
     cache.set(key, { status, fetchedAt: Date.now() });
     return status;
