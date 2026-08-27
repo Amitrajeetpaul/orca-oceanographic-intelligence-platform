@@ -139,6 +139,8 @@ async function synthesizeWithGroq(params: {
 
   const systemPrompt = `You are ORCA, a marine intelligence assistant for Indian coastal waters. A user (role: ${params.role}) asked about region "${params.region}". Three specialized agents just gathered LIVE evidence below. Write a 2-4 sentence answer using ONLY the numbers and facts given below — never invent a number that isn't listed. If an agent reports "Unavailable" or low confidence, say so plainly instead of guessing. Do not add a source citation line, one is appended separately.
 
+IMPORTANT — give a verdict, not just numbers: if the question is about whether it's safe to go out, go fishing, or travel by sea (or asks generally "how are conditions" with that intent implied), end your answer with an explicit, direct recommendation — e.g. "Recommended: safe to go out today" or "Not recommended — wave/wind conditions exceed safe limits" or "Proceed with caution — [specific reason]". Base the verdict only on the hazard signals in the evidence (wave/wind status, lightning, cyclone proximity) — never just restate the numbers and leave the user to judge for themselves.
+
 IMPORTANT — scope: if the user's question is NOT actually about ocean, coastal, weather, or fishing conditions (e.g. general trivia, unrelated topics), do NOT answer it from your own general knowledge even if you know the answer. Instead, briefly and politely say ORCA is a marine intelligence assistant for Indian coastal waters and can't help with that, and suggest the kind of question it can answer instead. Ignore the evidence block in that case.
 
 IMPORTANT — language: detect the language the user's question is written in (English, or any Indian regional language such as Hindi, Tamil, Telugu, Malayalam, Kannada, Bengali, Gujarati, Marathi, or Odia — the question could be in any of these, including transliterated into Latin script, or contain minor transcription noise from voice input). Reply in that SAME language and script the user used. If the language is genuinely ambiguous${
@@ -364,6 +366,18 @@ function buildTemplateAnswer(
   extractionFailed = false
 ): string {
   const [temp, chl, weather, tide] = findings;
+  // A raw data dump without an actual go/no-go read was the real gap here —
+  // fishermen asking "should I go out today" got four numbers back and had
+  // to judge the answer themselves. This gives a plain verdict from the
+  // same hazard signals already computed by the Weather Agent and cyclone
+  // check, so even the non-AI fallback path answers the actual question.
+  const verdict = nearbyCyclone
+    ? `Recommendation: Not advisable to go out — an active cyclone is nearby.`
+    : weather.status === 'warning'
+    ? `Recommendation: Exercise caution — sea conditions currently exceed typical safe operating limits.`
+    : weather.confidence > 0
+    ? `Recommendation: Conditions currently appear favorable for fishing, based on available data.`
+    : '';
   // extractionFailed takes priority — it means the AI service itself
   // couldn't even process what place was being asked about (distinct from
   // "found a place name but couldn't locate it"), so the disclaimer must
@@ -394,6 +408,7 @@ function buildTemplateAnswer(
       nearbyCyclone
         ? `Cyclone Alert: Tropical Cyclone ${nearbyCyclone.cyclone.name} is active roughly ${Math.round(nearbyCyclone.distanceKm)}km away (${nearbyCyclone.cyclone.severityText}).`
         : 'No active tropical cyclone within 500km.',
+      verdict,
     ]
       .filter(Boolean)
       .join(' ')
